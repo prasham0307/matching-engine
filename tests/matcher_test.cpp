@@ -1,25 +1,12 @@
 #include <gtest/gtest.h>
 
-#include <ostream>
 #include <string>
 #include <type_traits>
 #include <vector>
 
 #include "lob/naive_matcher.hpp"
 #include "lob/order_book.hpp"
-
-namespace lob {
-
-// Test-only helpers so failures print readable trades.
-bool operator==(const Trade& a, const Trade& b) {
-  return a.makerId == b.makerId && a.takerId == b.takerId && a.price == b.price && a.qty == b.qty;
-}
-std::ostream& operator<<(std::ostream& os, const Trade& t) {
-  return os << "(maker " << t.makerId << ", taker " << t.takerId << ", " << t.price << ", "
-            << t.qty << ")";
-}
-
-}  // namespace lob
+#include "test_util.hpp"
 
 namespace {
 
