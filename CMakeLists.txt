@@ -29,7 +29,7 @@ FetchContent_Declare(benchmark
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(googletest benchmark)
 
-add_library(lob STATIC src/placeholder.cpp src/naive_matcher.cpp)
+add_library(lob STATIC src/placeholder.cpp src/naive_matcher.cpp src/order_book.cpp)
 target_include_directories(lob PUBLIC include)
 target_link_libraries(lob PUBLIC lob_flags)
 

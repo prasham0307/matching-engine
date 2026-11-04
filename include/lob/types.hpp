@@ -15,6 +15,8 @@ struct Order {
   uint32_t qty;
   uint32_t remaining;
   uint64_t seq;
+  Order* prev = nullptr;  // intrusive FIFO links, owned by the book that holds the order
+  Order* next = nullptr;
 };
 
 struct Trade {

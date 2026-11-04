@@ -1,4 +1,4 @@
-add_executable(lob_tests smoke_test.cpp naive_matcher_test.cpp)
+add_executable(lob_tests smoke_test.cpp matcher_test.cpp)
 target_link_libraries(lob_tests PRIVATE lob GTest::gtest_main)
 
 include(GoogleTest)
