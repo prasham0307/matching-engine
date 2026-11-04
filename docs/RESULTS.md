@@ -56,7 +56,7 @@ Reproduce:
 |---|---|---|---|---|---|---|---|
 | 2026-11-04 | baseline: std::map + unique_ptr orders | e5f469b | 142 ns | 890 ns | 1,719 ns | 3.89M | Median of 3 runs. 2,811,186 trades, 81,137 resting orders at end, checksum 002f8ec71a31eeb9, timer overhead 26 ns |
 | 2026-11-04 | pool Orders + reuse trade buffer | 0b81941 | 135 ns | 583 ns | 1,081 ns | 4.54M | Median of 5 runs per metric, not one run. Same-session before: p50 158, p99 970, p99.9 1,733, 3.59M ops/s. Before and after ranges do not overlap. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 1" below |
-| 2026-11-04 | flat open-addressed id index | (this commit) | 92 ns | 413 ns | 722 ns | 5.97M | Median of 5 runs per metric, same-session before: p50 121, p99 532, p99.9 990, 4.92M ops/s. Interleaved A/B against the previous code (6 pairs, every pair faster): 4.67M to 6.10M ops/s, +30.6%. Index resizes in measured loop: 0. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 2" below |
+| 2026-11-04 | flat open-addressed id index | 131ab28 | 92 ns | 413 ns | 722 ns | 5.97M | Median of 5 runs per metric, same-session before: p50 121, p99 532, p99.9 990, 4.92M ops/s. Interleaved A/B against the previous code (6 pairs, every pair faster): 4.67M to 6.10M ops/s, +30.6%. Index resizes in measured loop: 0. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 2" below |
 
 ## Baseline runs (run-to-run variation)
 
