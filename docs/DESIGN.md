@@ -1,32 +1,30 @@
-Draft written by Claude Code from the repo history. Prasham reviews and rewrites in his own words.
-
 # Design decisions
 
-I write one entry per decision. Each entry has the same fields: Chosen, Rejected alternative, Why, Tradeoff, Evidence.
+One entry per decision. Each has: Chosen, Rejected alternative, Why, Tradeoff, Evidence.
 
 Evidence points at tests, commits, or numbers in docs/RESULTS.md. If I did not measure something, the entry says so. All timings come from one machine (an Intel Core Ultra 9 185H under WSL2), so they are noisy. Entry 12 explains how I deal with that.
 
 ## 1. Integer ticks instead of doubles
 
-**Chosen:** Prices are `int64_t` ticks. A price is a whole number of ticks, never a floating point value.
+**Chosen:** Prices are `int64_t` ticks, a whole number of ticks, never floating point.
 
 **Rejected alternative:** Storing prices as `double`.
 
-**Why:** I want exact comparisons. Matching is just "does this price cross that price", and that must never depend on rounding. Integers also let me index an array by `price - base`, which the level array later does.
+**Why:** Matching is "does this price cross that price", and that must never depend on rounding. A price like 100.10 has no exact binary form, so two orders that should share a level could end up on different ones. Integers also let me index an array by `price - base`, which the level array uses later.
 
-**Tradeoff:** The caller has to convert to ticks. There are no prices smaller than one tick. The tick size is fixed outside the engine.
+**Tradeoff:** The caller has to convert to ticks. There is nothing smaller than one tick. The tick size is fixed outside the engine.
 
-**Evidence:** `Order::price` is `int64_t` in `include/lob/types.hpp`. The window test in `PriceLevels` is one unsigned subtraction and compare. Unit tests check it at the ends of the int64 range (`ExtremePricesAreHandledAroundTheWindow`, `ExtremePricesRestAndMatch`). I did not benchmark doubles against integers.
+**Evidence:** `Order::price` is `int64_t` in `include/lob/types.hpp`. Unit tests check prices at the ends of the int64 range (`ExtremePricesAreHandledAroundTheWindow`, `ExtremePricesRestAndMatch`). I did not benchmark doubles against integers.
 
 ## 2. Single-threaded matching per symbol, no locks
 
-**Chosen:** One thread owns one `OrderBook`. There are no mutexes and no atomics inside it.
+**Chosen:** One thread owns one `OrderBook`. No mutexes and no atomics inside it.
 
 **Rejected alternative:** A shared book with locks, or lock-free structures.
 
-**Why:** Matching has a strict order. Order N must see the book exactly as order N-1 left it. One owner keeps that simple and keeps results deterministic. It also keeps the intrusive linked lists easy to reason about.
+**Why:** Order N must see the book exactly as order N-1 left it. One owner keeps that rule simple and keeps results deterministic, so replay and fuzzing against the oracle work. It also keeps the linked lists easy to reason about.
 
-**Tradeoff:** One symbol can use only one core. Scaling would mean one book per symbol, or per shard. There is also no input queue yet. The SPSC ring buffer is not built.
+**Tradeoff:** One symbol can use only one core. Scaling means one book per symbol or shard. There is no input queue yet, because the SPSC ring buffer is not built.
 
 **Evidence:** The benchmark runs one book on one thread pinned to core 2 (RESULTS.md, Machine). The checksum `002f8ec71a31eeb9` is identical in every default run. I did not measure the cost of locks, so I make no claim about it.
 
@@ -36,112 +34,112 @@ Evidence points at tests, commits, or numbers in docs/RESULTS.md. If I did not m
 
 **Rejected alternative:** A `std::vector`, `std::deque` or `std::list` of orders per level.
 
-**Why:** Cancel needs to remove an order from the middle of a level. With intrusive links that is O(1) and allocates nothing. The orders also have stable addresses because they live in a pool (entry 9).
+**Why:** Cancel has to remove an order from the middle of a level. With intrusive links that is O(1) and allocates nothing. Orders have stable addresses because they live in a pool (entry 9).
 
 **Tradeoff:** The list pointers live inside `Order`, so `Order` is tied to this design. Walking a level follows pointers, which is not cache friendly. I did not benchmark the alternatives.
 
-**Evidence:** Tests cover a partial fill keeping the front of the queue, cancel in the middle of a level keeping the rest of the queue, and cancelling the last order at a level removing the level. `OrderBook::check_invariants()` checks the links in both directions, the level totals, and that no empty level exists.
+**Evidence:** Tests cover a partial fill keeping the front of the queue, a cancel in the middle keeping the rest of the queue, and cancelling the last order at a level removing the level. `OrderBook::check_invariants()` checks the links in both directions, the level totals, and that no empty level exists.
 
 ## 4. Modify as cancel plus resubmit
 
-**Chosen:** `modify` cancels the order and submits a new limit order with the same id and a new sequence number. So it goes to the back of the queue. If the id is not resting, nothing changes. A new quantity of 0 cancels the order. A modify can trade immediately if the new price crosses.
+**Chosen:** `modify` cancels the order and submits a new limit order with the same id and a new sequence number, so it goes to the back of the queue. If the id is not resting, nothing changes. A new quantity of 0 cancels the order. A modify can trade immediately if the new price crosses.
 
-**Rejected alternative:** Changing the order in place and keeping its queue position when it is safe.
+**Rejected alternative:** Changing the order in place and keeping its queue position when that is safe.
 
-**Why:** It is one simple rule, easy to state and easy to check against the oracle. I did not build the in-place version.
+**Why:** Keeping position after changing price or size would let a trader jump ahead of orders that arrived earlier, which breaks time priority. Cancel plus resubmit is one simple rule that is easy to state and easy to check against the oracle.
 
-**Tradeoff:** A modify always loses its place, even a size reduction. It also costs a cancel and a submit, which means more id index work.
+**Tradeoff:** A modify always loses its place, even a size reduction. It costs a cancel and a submit, which means more id index work. I did not make any claim about what real exchanges do.
 
-**Evidence:** Tests `ModifySendsOrderToBackOfLevel`, `ModifyCanCrossAndTrade`, `ModifyToZeroQtyCancelsTheOrder`, and `ModifyMovesAnOrderAcrossTheWindowEdgeAndBack`. The demo prints "(new time priority)" after a modify.
+**Evidence:** Tests `ModifySendsOrderToBackOfLevel`, `ModifyCanCrossAndTrade`, `ModifyToZeroQtyCancelsTheOrder`, `ModifyMovesAnOrderAcrossTheWindowEdgeAndBack`. The demo prints "(new time priority)" after a modify.
 
 ## 5. A sequence counter instead of timestamps
 
-**Chosen:** Time priority uses `seq`, a counter that goes up every time an order comes to rest. There is no clock anywhere in the matching rules.
+**Chosen:** Time priority uses `seq`, a counter that goes up every time an order comes to rest. No clock appears anywhere in the matching rules.
 
 **Rejected alternative:** Timestamps from a clock.
 
-**Why:** I want the same input to give the same trades every time, on any machine and in any run. A counter does that. It also makes the engine easy to test against the oracle.
+**Why:** The same input must give the same trades every time, on any machine. A counter does that. It also makes the engine easy to test against the oracle.
 
 **Tradeoff:** `seq` only says which order arrived first at this book. It is not a real arrival time. The engine records no real timestamps.
 
-**Evidence:** The comment on `Order::seq` says it is never a clock. The checksum is identical across all the default runs in RESULTS.md, including 10 runs in the pooling task. The fuzz test is deterministic for a given seed.
+**Evidence:** The comment on `Order::seq` says it is never a clock. The checksum is identical across all default runs in RESULTS.md. The fuzz test is deterministic for a given seed.
 
 ## 6. Differential fuzzing against NaiveMatcher as the main correctness proof
 
-**Chosen:** `NaiveMatcher` is a reference implementation made to be obviously correct, not fast. It keeps one `std::vector<Order>` and scans the whole vector for every fill. A random generator feeds the same operations to `NaiveMatcher` and `OrderBook`. After every operation the test compares the trades (including their order), the cancel result, and the best bid and ask. Every 1000 operations it also compares `total_qty_at`, checks that `depth()` is well formed, and calls `check_invariants()`. On the first mismatch it prints the seed, the operation index, the operation, both results, and the last 10 operations.
+**Chosen:** `NaiveMatcher` is a reference made to be obviously correct, not fast: one `std::vector<Order>`, scanned fully on every fill. A seeded random generator feeds the same operations to `NaiveMatcher` and `OrderBook`. After every operation the test compares the trades (including their order), the cancel result, and the best bid and ask. Every 1000 operations it also compares `total_qty_at`, checks `depth()` is well formed, and calls `check_invariants()`. On the first mismatch it prints the seed, the operation index, both results and the last 10 operations.
 
 **Rejected alternative:** Only hand-written unit tests, or only invariant checks.
 
-**Why:** Random sequences find interactions I would not think to write down, like cancelling an id that was already filled, or a modify that crosses. The oracle is short enough to read and trust.
+**Why:** Random sequences find interactions I would not write down, like cancelling an id that was already filled, or a modify that crosses. The oracle is short enough to read and trust.
 
-**Tradeoff:** The test is only as good as the oracle and the generator. If I misunderstood a rule, both implementations share my mistake. The oracle is slow, so runs are short: the defaults are 40,000 ops per seed in Debug and 250,000 in Release, across 6 seeds. A comment in `tests/fuzz_test.cpp` records that 40k ops per seed takes 19 s in Debug and 80k takes 66 s.
+**Tradeoff:** The test is only as good as the oracle and the generator. If I misunderstood a rule, both implementations share the mistake. The oracle is slow, so runs are short: the defaults are 40,000 ops per seed in Debug and 250,000 in Release, across 6 seeds.
 
 **Evidence:**
-- The generator once picked cancel and modify targets from every id ever issued, so most of them missed. I added a bias toward recent ids. Now the test asserts that the cancel and modify hit rates stay above 8%. Measured hit rates are 16.9% to 18.2% in every scenario (RESULTS.md, Optimization 3).
-- Five scenarios run against the oracle: the default in-window case, a window edge crossing, everything through the fallback, a wide price range (1..5000), and far-outside prices (5% of prices uniform within 2^62 of zero). The in-window case must use the slow path exactly 0 times. The other four must use it more than a set amount per op (0.08, 0.19, 0.15 and 0.007).
-- Bug injection: I put bugs into the code by hand and checked that the fuzz test failed. In `OrderBook` I tried buying with `<` instead of `<=`, and moving a partly filled order to the back of its queue. Both were caught, then reverted and checked with `git diff`. In `price_levels.hpp` I tried three bugs (window bound `<=` instead of `<`, a best-price merge that ignores the fallback, a cursor that does not advance). All three were caught (RESULTS.md, Optimization 3). The bugs were never committed.
+- The generator once picked cancel and modify targets from every id ever issued, so most missed. I added a bias toward recent ids. The test now asserts the cancel and modify hit rates stay above 8%. Measured hit rates are 16.9% to 18.2% in every scenario (RESULTS.md, Optimization 3).
+- Five scenarios run against the oracle: the default in-window case, a window edge crossing, everything through the fallback, a wide price range (1..5000), and far-outside prices (5% of prices uniform within 2^62 of zero).
+- Bug injection: I put bugs in by hand and checked the fuzz test failed. In `OrderBook` I tried buying with `<` instead of `<=`, and moving a partly filled order to the back of its queue. Both were caught, then reverted. In `price_levels.hpp` I tried three bugs (window bound `<=` instead of `<`, a best-price merge that ignores the fallback, a cursor that does not advance). All three were caught (RESULTS.md, Optimization 3). None were committed.
 
-## 7. Measuring with a pre-generated op stream, a pinned core, a checksum and percentiles
+## 7. Measuring: pre-generated ops, pinned core, checksum, percentiles
 
-**Chosen:** `lob_latency` generates all operations before any timing starts. It runs warm-up operations and throws their timings away. Then it times each measured operation on its own with `steady_clock` into a preallocated vector. It pins the thread to a core. It folds every returned trade into a checksum. It reports p50, p90, p99, p99.9 and max, plus throughput. It refuses to run in a Debug build.
+**Chosen:** `lob_latency` generates all operations before timing starts, runs warm-up operations and discards their timings, then times each measured operation on its own with `steady_clock` into a preallocated vector. It pins the thread to a core, folds every returned trade into a checksum, and reports p50, p90, p99, p99.9, max and throughput. It refuses to run in a Debug build.
 
 **Rejected alternative:** An average time per iteration, or generating operations inside the timed loop.
 
 **Why:** Generation must not be in the timing. Averages hide the tail. The checksum proves two runs did the same work and that a change did not alter behavior.
 
-**Tradeoff:** The timer costs about 26 ns per measurement (median of 1,000,000 back-to-back pairs) and I do not subtract it. Throughput includes the timer calls and the checksum update. WSL2 adds noise, and max latency shows multi-millisecond outliers that say nothing about the code.
+**Tradeoff:** The timer costs about 26 ns per measurement and I do not subtract it. Throughput includes the timer calls and the checksum update. WSL2 adds noise, and max latency shows multi-millisecond outliers that say nothing about the code.
 
 **Evidence:** RESULTS.md, Method. The same code run three times back to back gave p50 of 137, 157 and 142 ns and 3.49M to 4.11M ops/s (RESULTS.md, Baseline runs). That spread is why I report medians and ranges.
 
 ## 8. Profiling with Valgrind, because perf is not available on WSL2
 
-**Chosen:** Callgrind gives instruction counts and call counts for the engine only. I use client-request toggles (`LOB_CALLGRIND`) so the profile skips the harness setup. Cachegrind gives whole-program numbers. A script, `tools/callgrind_breakdown.py`, turns the raw profile into a component table.
+**Chosen:** Callgrind gives instruction counts and call counts for the engine only. Toggles (`LOB_CALLGRIND`) make the profile skip harness setup. Cachegrind gives whole-program numbers. `tools/callgrind_breakdown.py` turns the raw profile into a component table.
 
 **Rejected alternative:** `perf`. It is not installed, and the WSL2 kernel would not have matching tools.
 
-**Why:** Instruction counts and call counts are exact and repeatable. They told me where the work went, and they ranked the optimizations.
+**Why:** Instruction counts and call counts are exact and repeatable. They showed where the work went and ranked the optimizations.
 
-**Tradeoff:** Cache and branch numbers are simulated. The simulated L1 data cache is 48 KB 12-way and the last-level cache is 24 MB. There is no L2. Valgrind's branch predictor is cruder than a real one. The time shares come from a simple cost model that I never checked against hardware counters. Instruction count is not time.
+**Tradeoff:** Cache and branch numbers are simulated. The simulated L1 data cache is 48 KB 12-way and the last-level cache is 24 MB, with no L2. Valgrind's branch predictor is cruder than a real one. The time shares come from a simple cost model I never checked against hardware counters. Instruction count is not time.
 
-**Evidence:** RESULTS.md, Profile of the baseline, lists the caveats. In the identity-hash experiment (entry 10) simulated L1 misses fell from 1.65 to 0.99 per op and wall-clock time did not change measurably. That shows the model gives L1 misses more weight than real hardware does. The profiles are committed in `docs/profiles/`.
+**Evidence:** RESULTS.md, Profile of the baseline, lists the caveats. In the identity-hash experiment (entry 10) simulated L1 misses fell from 1.65 to 0.99 per op and wall-clock time did not change measurably, so the model weights L1 misses more than real hardware does. The profiles are committed in `docs/profiles/`.
 
 ## 9. Order pool and a caller-supplied trade buffer
 
 **Chosen:** `OrderPool` hands out `Order` slots from 4096-slot chunks. Free slots form a list threaded through the unused `Order::next` field. Addresses never move. Under ASan, released slots are poisoned, so reading one is still reported. `submit_limit`, `submit_market` and `modify` write into a `std::vector<Trade>&` that is cleared and reused. The old functions that return a vector stay as thin wrappers.
 
-**Rejected alternative:** One heap allocation per order (`unique_ptr<Order>` in the id map), and returning a new `vector<Trade>` from every call.
+**Rejected alternative:** One heap allocation per order, and returning a new `vector<Trade>` from every call.
 
-**Why:** The baseline profile showed allocator work of 256.6 instructions per op, about 43% of everything collected, at 3.18 allocator calls per op.
+**Why:** The baseline profile showed allocator work at 256.6 instructions per op, about 43% of everything collected, at 3.18 allocator calls per op.
 
-**Tradeoff:** The pool never shrinks. Its size stays at the peak number of resting orders. Callers have to reuse their buffer, or they pay for allocation again. The wrappers allocate.
+**Tradeoff:** The pool never shrinks. Its size stays at the peak number of resting orders. Callers have to reuse their buffer or they pay for allocation again. The wrappers allocate.
 
 **Evidence:** RESULTS.md, Optimization 1. Instructions per op went from 596 to 374 (200k ops) and 375 (5M ops). Allocator calls went from 3.18 to 1.27 at 5M. On the interleaved scale throughput went from 6.07M to 7.20M ops/s (+18.6%). In the same-session 5-run sets the tail improved more than the median (p99 -39.9%, p50 -14.6%).
 
 ## 10. A flat open-addressed id index
 
-**Chosen:** `IdIndex` replaces `unordered_map`. It is one contiguous array of 16-byte `{key, Order*}` slots, aligned to 64 bytes, with a power-of-two capacity, linear probing, and a load factor kept under 0.5. Deletion uses backward shift, so there are no tombstones. The hash is a multiply: `((id ^ (id >> 32)) * golden) >> shift`. The constructor sizes the table for the expected number of resting orders. Growing is a slow path, and a resize counter lets the benchmark prove it never ran.
+**Chosen:** `IdIndex` replaces `unordered_map`. It is one contiguous array of 16-byte `{key, Order*}` slots, aligned to 64 bytes, with power-of-two capacity, linear probing and load kept under 0.5. Deletion uses backward shift, so there are no tombstones. The hash is a multiply: `((id ^ (id >> 32)) * golden) >> shift`. The constructor sizes the table for the expected number of resting orders. Growing is a slow path, and a resize counter lets the benchmark prove it never ran.
 
-**Rejected alternative:** `unordered_map` with `reserve` and pooled nodes. Intrusive chaining through a new `Order` field. A `vector<Order*>` indexed by id. Tombstones. The identity hash, which I tried as an experiment.
+**Rejected alternative:** `unordered_map` with `reserve` and pooled nodes, intrusive chaining through a new `Order` field, a `vector<Order*>` indexed by id, tombstones, and the identity hash (tried as an experiment).
 
-**Why:** In the baseline profile the `unordered_map` plus its node allocations cost 137.4 instructions per op, about 24.9% of engine instructions, and about half of the simulated L1 misses. `std::hash<uint64_t>` is the identity on libstdc++, so a power-of-two mask would cluster ids with shared low bits. A multiply spreads them. Tombstones would fill the chains with dead entries, because this workload inserts and erases about 0.4 times per op. A `vector` indexed by id would be fastest here because the generator's ids are dense, but it would be wrong for sparse ids and would flatter the benchmark.
+**Why:** In the baseline profile the `unordered_map` plus its node allocations cost 137.4 instructions per op, about 24.9% of engine instructions, and about half of the simulated L1 misses. `std::hash<uint64_t>` is the identity on libstdc++, so a power-of-two mask would cluster ids that share low bits. A multiply spreads them. Tombstones would fill chains with dead entries because this workload inserts and erases about 0.4 times per op. A `vector` indexed by id would be fastest here because the generator's ids are dense, but it would be wrong for sparse ids and would flatter the benchmark.
 
 **Tradeoff:** The table is 4 MB at 31% load for 81k live orders. The multiply hash scatters sequential ids, so about 0.9 simulated L1 misses per op remain. A moved-from `IdIndex` can only be destroyed or assigned.
 
-**Evidence:** RESULTS.md, Optimization 2. Instructions per op went from 375 to 284. The id index's own code went from 66 to 31 instructions per op and lost all its allocations. On the interleaved scale throughput went from 7.20M to 9.71M ops/s (+34.8%). Twenty unit tests cover the table, including backward shift at every erase position and a randomized comparison with `std::unordered_map`. The identity-hash experiment cut simulated L1 misses from 1.65 to 0.99 per op, but three interleaved pairs showed no wall-clock difference. I did not adopt it, because it is only safe for dense sequential ids.
+**Evidence:** RESULTS.md, Optimization 2. Instructions per op went from 375 to 284. On the interleaved scale throughput went from 7.20M to 9.71M ops/s (+34.8%). Twenty unit tests cover the table, including backward shift at every erase position and a randomized comparison with `std::unordered_map`. The identity-hash experiment cut simulated L1 misses from 1.65 to 0.99 per op, but three interleaved pairs showed no wall-clock difference. I did not adopt it because it is only safe for dense sequential ids.
 
 ## 11. A flat level array with a bitmap cursor and a std::map fallback
 
 **Chosen:** `PriceLevels` keeps an array of levels indexed by `price - base` over a window of W ticks (default base 0, 4096 ticks). One bit per level marks the non-empty ones, and a cursor holds the best index. When the best level empties, `countl_zero` or `countr_zero` over the bitmap words finds the next one. Prices outside the window go to a `std::map` per side. That map is a slow path: it allocates and costs O(log n). `best()` merges the window and the map by price. `out_of_window_orders()` counts orders that used the slow path.
 
-**Rejected alternative:** A window that recenters itself. A ring indexed by `price mod W`. A sorted vector of levels. A hash map from price to level. A two-level bitmap.
+**Rejected alternative:** A window that recenters itself, a ring indexed by `price mod W`, a sorted vector of levels, a hash map from price to level, a two-level bitmap.
 
 **Why:** After the earlier steps the `std::map` levels plus their node allocations cost 90.7 instructions per op (35.5% of engine instructions). I chose the bitmap over scanning the array because a scan gets slower as the window gets sparser.
 
-**Tradeoff:** The window is fixed. Nothing recenters it. If prices drift outside it, the engine stays correct but slow. A level that is far from the window allocates.
+**Tradeoff:** The window is fixed and nothing recenters it. If prices drift outside it, the engine stays correct but slow, and a level far from the window allocates.
 
 **Evidence:** RESULTS.md, Optimization 3. Instructions per op went from 284 to 216. Allocator calls went from 0.49 to 0.00. In 12 alternating pairs the new code was faster in all 12, with a median gain of +15.5% and a paired ratio from 1.05 to 1.34. Two other interleaved sets gave +20% and +8%, so the size of the gain is uncertain. On the interleaved scale throughput went from 9.71M to 10.51M ops/s (+8.2%).
 
-The honest part: the default workload only uses 21 adjacent prices (90 to 110), which is the best case for a flat array. The 4096-tick window and a 21-tick window ran at the same speed (median ratio 1.00), but that only shows empty ticks are free. I also ran a price band of 1..2000. A 4096-tick window covering it gave 10.58M ops/s. A 21-tick window gave 7.73M, and no window gave 7.87M. So missing the window costs about 26% in throughput and 38% to 48% in p99, and every run still gave the same checksum. I did not measure windows far larger than 4096 ticks, and I did not measure a book whose best level empties with the next one thousands of ticks away.
+The honest part: the default workload only uses 21 adjacent prices (90 to 110), which is the best case for a flat array. The 4096-tick window and a 21-tick window ran at the same speed, but that only shows empty ticks are free. On a price band of 1..2000, a 4096-tick window covering it gave 10.58M ops/s. A 21-tick window gave 7.73M, and no window gave 7.87M. So missing the window costs about 26% in throughput and 38% to 48% in p99, and every run still gave the same checksum. I did not measure windows far larger than 4096 ticks, and I did not measure a book whose best level empties with the next one thousands of ticks away.
 
 ## 12. Interleaved A/B as the standard way to compare
 
@@ -153,4 +151,4 @@ The honest part: the default workload only uses 21 adjacent prices (90 to 110), 
 
 **Tradeoff:** It takes more runs. The result is a ratio with a range, not one clean number. It is still WSL2, so native Linux would be better.
 
-**Evidence:** RESULTS.md, Optimization 2 and 3. For the level array, the sequential sets looked like +58% (6.07M before and 9.60M after). The 12 interleaved pairs gave +15.5%. For the id index, a batch of identity-hash runs reached 8 to 12M ops/s in 3 of 5 runs, double anything else seen, and a control run minutes later did not reproduce it. Because of this, the earlier rows in the Log are not on one scale. I re-measured all four versions interleaved (RESULTS.md, Optimization 3) and the README uses that table.
+**Evidence:** RESULTS.md, Optimization 2 and 3. For the level array, the sequential sets looked like +58% (6.07M before and 9.60M after). The 12 interleaved pairs gave +15.5%. A batch of identity-hash runs reached 8 to 12M ops/s in 3 of 5 runs, double anything else seen, and a control run minutes later did not reproduce it. Because of this the earlier rows in the Log are not on one scale. I re-measured all four versions interleaved (RESULTS.md, Optimization 3) and the README uses that table.
