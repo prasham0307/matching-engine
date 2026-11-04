@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <random>
 
@@ -29,6 +30,11 @@ struct GenConfig {
   uint32_t weight_market = 10;
   uint32_t weight_cancel = 25;
   uint32_t weight_modify = 10;
+  // Cancel/modify targeting: after the ~5 percent never-issued case, recent_bias_pct percent
+  // of targets are drawn uniformly from the last recent_window issued ids, the rest from all
+  // ids ever issued. Recent ids are far more likely to still be resting.
+  uint32_t recent_bias_pct = 80;
+  uint32_t recent_window = 50;
 };
 
 // Deterministic random operation stream. Only the raw output of std::mt19937_64 (whose
@@ -79,10 +85,13 @@ class OrderGenerator {
     return cfg_.qty_min + static_cast<uint32_t>(below(span));
   }
 
-  // Any id ever issued (filled and cancelled ones included), or about 5 percent of the time
-  // an id that has not been issued yet.
+  // About 5 percent of the time an id that has not been issued yet. Otherwise, with
+  // recent_bias_pct percent probability one of the last recent_window issued ids, else any id
+  // ever issued (filled and cancelled ones included).
   uint64_t target_id() {
     if (last_id_ == 0 || below(100) < 5) return last_id_ + 1 + below(1000);
+    const uint64_t window = std::min<uint64_t>(cfg_.recent_window, last_id_);
+    if (window > 0 && below(100) < cfg_.recent_bias_pct) return last_id_ - below(window);
     return 1 + below(last_id_);
   }
 

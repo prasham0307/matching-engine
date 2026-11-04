@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -30,11 +31,11 @@ using Trades = std::vector<Trade>;
 
 // Operations per seed: FUZZ_OPS if set, otherwise a default sized for a quick test run.
 //
-// The defaults are small on purpose. The generator picks cancel/modify targets from every id
-// ever issued, so almost all of them miss and the book grows roughly linearly with run length
-// (about 7000 resting orders after 200k ops). NaiveMatcher scans the whole book per fill, so
-// total cost is quadratic: 40k ops/seed already takes 32 s in Debug, and 200k ops/seed 48 s in
-// Release. Raise FUZZ_OPS for deeper one-off runs.
+// NaiveMatcher scans the whole book on every fill, so total cost grows quadratically with run
+// length (the book keeps growing, just more slowly than it used to, about 4900 resting orders
+// after 300k ops). Measured on the dev machine with 6 seeds: Debug 40k ops/seed takes 19 s
+// (80k takes 66 s), Release 250k ops/seed takes about 20 s (300k takes 35 s). Raise FUZZ_OPS
+// for deeper one-off runs.
 uint64_t fuzz_ops() {
   if (const char* env = std::getenv("FUZZ_OPS")) {
     char* end = nullptr;
@@ -42,9 +43,9 @@ uint64_t fuzz_ops() {
     if (end != env && *end == '\0' && v > 0) return v;
   }
 #ifdef NDEBUG
-  return 100'000;
+  return 250'000;
 #else
-  return 20'000;
+  return 40'000;
 #endif
 }
 
@@ -112,8 +113,23 @@ struct Stats {
   uint64_t ops = 0;
   uint64_t trades = 0;
   uint64_t cancel_attempts = 0;
-  uint64_t cancel_hits = 0;
+  uint64_t cancel_hits = 0;   // the id was resting and got cancelled
+  uint64_t modify_attempts = 0;
+  uint64_t modify_hits = 0;   // the id was resting when the modify arrived
+  uint64_t max_resting = 0;   // peak number of resting orders seen
 };
+
+// Minimum hit rates, set at roughly half of what the generator measured when they were
+// chosen (about 17 percent for both). If a generator change drops cancels/modifies back to
+// mostly missing, the test fails instead of silently covering less.
+constexpr double kMinCancelHitRate = 0.08;
+constexpr double kMinModifyHitRate = 0.08;
+// Rates are only asserted once there are enough attempts for them to be meaningful.
+constexpr uint64_t kMinAttemptsForRateCheck = 1000;
+
+double rate(uint64_t hits, uint64_t attempts) {
+  return attempts == 0 ? 0.0 : static_cast<double>(hits) / static_cast<double>(attempts);
+}
 
 // Runs n operations through both implementations. Returns an empty string if they agreed
 // throughout, otherwise a full description of the first mismatch.
@@ -130,14 +146,22 @@ std::string run_seed(uint64_t seed, uint64_t n, Stats& stats) {
     recent.emplace_back(i, op);
     if (recent.size() > 10) recent.pop_front();
 
+    // A modify returns no trades both when rejected and when it rests quietly, so whether it
+    // hit has to be read off the book before the operation runs.
+    const bool was_resting = naive.is_resting(op.id);
+
     const Outcome a = apply(naive, op);
     const Outcome b = apply(book, op);
 
     ++stats.ops;
     stats.trades += a.trades.size();
+    stats.max_resting = std::max<uint64_t>(stats.max_resting, naive.resting_count());
     if (op.kind == OpKind::Cancel) {
       ++stats.cancel_attempts;
       if (a.cancelled) ++stats.cancel_hits;
+    } else if (op.kind == OpKind::Modify) {
+      ++stats.modify_attempts;
+      if (was_resting) ++stats.modify_hits;
     }
 
     std::string why;
@@ -192,9 +216,22 @@ TEST(Fuzz, NaiveMatcherAndOrderBookAgree) {
   const double secs =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
+  const double cancel_rate = rate(stats.cancel_hits, stats.cancel_attempts);
+  const double modify_rate = rate(stats.modify_hits, stats.modify_attempts);
   std::cout << "[fuzz] " << seeds.size() << " seeds x " << n << " ops = " << stats.ops
-            << " ops, " << stats.trades << " trades, cancels hit " << stats.cancel_hits << "/"
-            << stats.cancel_attempts << ", " << secs << " s\n";
+            << " ops, " << stats.trades << " trades, " << secs << " s\n"
+            << "[fuzz] cancel hit rate " << 100.0 * cancel_rate << "% (" << stats.cancel_hits
+            << "/" << stats.cancel_attempts << "), modify hit rate " << 100.0 * modify_rate
+            << "% (" << stats.modify_hits << "/" << stats.modify_attempts
+            << "), max resting orders " << stats.max_resting << "\n";
+
+  // Guard against the generator silently losing its ability to exercise cancel and modify.
+  if (stats.cancel_attempts >= kMinAttemptsForRateCheck) {
+    EXPECT_GT(cancel_rate, kMinCancelHitRate) << "cancel hit rate fell below the minimum";
+  }
+  if (stats.modify_attempts >= kMinAttemptsForRateCheck) {
+    EXPECT_GT(modify_rate, kMinModifyHitRate) << "modify hit rate fell below the minimum";
+  }
 }
 
 }  // namespace

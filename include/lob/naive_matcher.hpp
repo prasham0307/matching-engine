@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -22,9 +23,11 @@ class NaiveMatcher {
   std::optional<int64_t> best_ask() const;
   uint32_t total_qty_at(Side side, int64_t price) const;
 
- private:
+  // Inspection helpers, used by the fuzz test to measure how often operations hit the book.
   bool is_resting(uint64_t id) const;
+  std::size_t resting_count() const { return book_.size(); }
 
+ private:
   // Matches an incoming order against the book, appending trades to `out`.
   // `limit` empty means a market order. Returns the unfilled quantity.
   uint32_t match(uint64_t takerId, Side side, std::optional<int64_t> limit, uint32_t qty,
