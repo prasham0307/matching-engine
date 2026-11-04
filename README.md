@@ -1,6 +1,6 @@
 # matching-engine
 
-A single-symbol limit order book matching engine in C++20, built to learn production-style C++, performance measurement and market microstructure. Prices are integer ticks. The engine matches limit, market, cancel and modify orders with price-time priority, and it is checked against a deliberately simple reference matcher with differential fuzzing. It was then optimized in measured steps. On the benchmark workload it went from 6.07M to 10.51M orders per second (interleaved measurements on one machine under WSL2, see Results for the caveats).
+A limit order book matching engine in C++20 (one order book per symbol, routed by a small `MatchingEngine`), built to learn production-style C++, performance measurement and market microstructure. Prices are integer ticks. The engine matches limit, market, cancel and modify orders with price-time priority, and it is checked against a deliberately simple reference matcher with differential fuzzing. It was then optimized in measured steps. On the benchmark workload it went from 6.07M to 10.51M orders per second (interleaved measurements on one machine under WSL2, see Results for the caveats).
 
 ## Features
 
@@ -11,6 +11,7 @@ A single-symbol limit order book matching engine in C++20, built to learn produc
 - Price-time priority. The best price matches first, and orders at the same price match in arrival order. A trade happens at the resting order's price.
 - Rejections: a quantity of 0, or an id that is already resting.
 - `depth()`, `best_bid()`, `best_ask()` and `total_qty_at()` for reading the book.
+- Multi-symbol routing with `MatchingEngine`: one book per symbol, order ids unique across symbols, cancel and modify by id alone.
 - A reference matcher (`NaiveMatcher`), an interactive demo, a latency benchmark, and Valgrind profiling tools.
 
 ## Layout
@@ -18,13 +19,15 @@ A single-symbol limit order book matching engine in C++20, built to learn produc
     include/lob/
       types.hpp            Order, Trade, Side
       naive_matcher.hpp    the simple reference matcher used as the oracle
-      order_book.hpp       the engine
+      order_book.hpp       one order book (one symbol)
+      matching_engine.hpp  routes orders to one book per symbol
+      flat_map.hpp         flat hash table used by the router
       order_pool.hpp       slab allocator for Orders
       id_index.hpp         flat open-addressed hash table, order id to Order*
       price_levels.hpp     flat level array with a bitmap and a std::map fallback
       price_level.hpp      one price level, an intrusive FIFO
       order_generator.hpp  seeded random operation stream
-    src/                   naive_matcher.cpp, order_book.cpp
+    src/                   naive_matcher.cpp, order_book.cpp, matching_engine.cpp
     tests/                 unit tests, window tests, and the differential fuzz test
     bench/                 latency_bench.cpp (lob_latency), smoke_bench.cpp (lob_bench)
     tools/                 demo.cpp (lob_demo), callgrind_breakdown.py
@@ -51,7 +54,7 @@ Release build (`-O3`, also the default build type):
     cmake --build build-release -j
     ctest --test-dir build-release --output-on-failure
 
-There are 103 tests. The fuzz test runs 6 seeds. The default is 40,000 operations per seed in Debug and 250,000 in Release for the main scenario, and `FUZZ_OPS` overrides it.
+There are 129 tests. The fuzz test runs 6 seeds. The default is 40,000 operations per seed in Debug and 250,000 in Release for the main scenario, and `FUZZ_OPS` overrides it.
 
 ## Run the demo
 
@@ -133,7 +136,7 @@ More detail on each choice is in [docs/DESIGN.md](docs/DESIGN.md), and my mistak
 ## Limitations
 
 - **Fixed price window.** Price levels live in a flat array over a window of ticks (default base 0, 4096 ticks). Prices outside it still work, through a `std::map`, but that is a slow path that allocates. On a price band of 1..2000, a window that missed the traffic was about 26% slower in throughput and 38% to 48% worse in p99. Nothing recenters the window. I did not measure windows far larger than 4096 ticks.
-- **One symbol, one thread.** The engine matches one symbol on one thread. There is no input queue (the SPSC ring buffer is not built) and no multi-symbol routing.
+- **One thread.** Each order book matches one symbol, and the `MatchingEngine` router runs all symbols on one thread. There is no multi-threading and no input queue (the SPSC ring buffer is not built). Order ids must be unique across symbols. I have not benchmarked the router, only a single `OrderBook`.
 - **No replay yet.** The benchmark uses a synthetic random order stream. Real market data replay is not built.
 - **Simulated cache and branch numbers.** Without `perf`, the profile uses Valgrind. Its cache sizes are a model (no L2) and its branch predictor is crude. The time shares come from a cost model I did not check against hardware counters.
 - **WSL2 noise.** All timings are from WSL2. Native Linux would be better for final numbers.

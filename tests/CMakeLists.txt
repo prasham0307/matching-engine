@@ -1,4 +1,4 @@
-add_executable(lob_tests smoke_test.cpp matcher_test.cpp fuzz_test.cpp order_pool_test.cpp id_index_test.cpp price_levels_test.cpp level_window_test.cpp)
+add_executable(lob_tests smoke_test.cpp matcher_test.cpp fuzz_test.cpp order_pool_test.cpp id_index_test.cpp price_levels_test.cpp level_window_test.cpp flat_map_test.cpp matching_engine_test.cpp)
 target_link_libraries(lob_tests PRIVATE lob GTest::gtest_main)
 
 include(GoogleTest)
