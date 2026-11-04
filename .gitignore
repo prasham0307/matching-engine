@@ -73,3 +73,7 @@ build-release/
 
 # Python bytecode
 __pycache__/
+
+# Generated replay data (see README, Replay). Hand-written test data uses .csv and is tracked.
+*.events
+*.trades

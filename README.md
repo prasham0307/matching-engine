@@ -12,7 +12,7 @@ A limit order book matching engine in C++20 (one order book per symbol, routed b
 - Rejections: a quantity of 0, or an id that is already resting.
 - `depth()`, `best_bid()`, `best_ask()` and `total_qty_at()` for reading the book.
 - Multi-symbol routing with `MatchingEngine`: one book per symbol, order ids unique across symbols, cancel and modify by id alone.
-- A reference matcher (`NaiveMatcher`), an interactive demo, a latency benchmark, and Valgrind profiling tools.
+- A reference matcher (`NaiveMatcher`), an interactive demo, a replay tool (`lob_replay`), a latency benchmark, and Valgrind profiling tools.
 
 ## Layout
 
@@ -27,10 +27,11 @@ A limit order book matching engine in C++20 (one order book per symbol, routed b
       price_levels.hpp     flat level array with a bitmap and a std::map fallback
       price_level.hpp      one price level, an intrusive FIFO
       order_generator.hpp  seeded random operation stream
-    src/                   naive_matcher.cpp, order_book.cpp, matching_engine.cpp
-    tests/                 unit tests, window tests, and the differential fuzz test
+      replay.hpp           replay file parser, trade log hash, verify oracle
+    src/                   naive_matcher.cpp, order_book.cpp, matching_engine.cpp, replay.cpp
+    tests/                 unit tests, window tests, the differential fuzz test, replay tests and tests/data
     bench/                 latency_bench.cpp (lob_latency), smoke_bench.cpp (lob_bench)
-    tools/                 demo.cpp (lob_demo), callgrind_breakdown.py
+    tools/                 demo.cpp (lob_demo), replay.cpp (lob_replay), callgrind_breakdown.py
     docs/                  DESIGN.md, LEARNING.md, RESULTS.md, profiles/
 
 ## Requirements
@@ -54,7 +55,7 @@ Release build (`-O3`, also the default build type):
     cmake --build build-release -j
     ctest --test-dir build-release --output-on-failure
 
-There are 129 tests. The fuzz test runs 6 seeds. The default is 40,000 operations per seed in Debug and 250,000 in Release for the main scenario, and `FUZZ_OPS` overrides it.
+There are 144 tests. The fuzz test runs 6 seeds. The default is 40,000 operations per seed in Debug and 250,000 in Release for the main scenario, and `FUZZ_OPS` overrides it.
 
 ## Run the demo
 
@@ -101,6 +102,35 @@ Engine-only profile with Valgrind (perf is not available on this machine):
 
 To compare two versions, I build the older commit in a separate directory and run the two binaries alternately, alternating which one goes first. docs/RESULTS.md explains why (see Results below).
 
+## Replay
+
+`lob_replay` runs a text file of order events through the `MatchingEngine` and writes a trade log, a summary, and a hash of the trade log. The same file always gives the same hash.
+
+Input is CSV, one event per line:
+
+    LIMIT,<id>,<symbol>,<BUY|SELL>,<price_ticks>,<qty>
+    MARKET,<id>,<symbol>,<BUY|SELL>,<qty>
+    CANCEL,<id>
+    MODIFY,<id>,<new_price_ticks>,<new_qty>
+
+Symbols are numbers. Lines starting with `#` and blank lines are ignored. Keywords are uppercase. Order ids are global across symbols, which is why `CANCEL` and `MODIFY` need no symbol. A malformed line stops the run with its line number and a message, and the exit code is 2. A well-formed event that the engine rejects (quantity 0, an id that is already resting, a cancel or modify of an id that is not resting) is counted in the summary and is not an error.
+
+The trade log has one line per trade, `maker_id,taker_id,symbol,price,qty`. The hash is FNV-1a 64 over the exact text of those lines, so it is also the hash of the trade log file.
+
+Commands:
+
+    # a small hand-checked example (tests/data/golden_events.csv, expected output in golden_trades.csv)
+    ./build-release/tools/lob_replay tests/data/golden_events.csv --verify --trades golden.trades
+
+    # generate 1,000,000 events over 3 symbols with seed 1, then replay them
+    ./build-release/tools/lob_replay --generate million.events --events 1000000 --symbols 3 --seed 1
+    ./build-release/tools/lob_replay million.events --trades million.trades
+    ./build-release/tools/lob_replay million.events --verify
+
+`--verify` also runs every event through one `NaiveMatcher` per symbol and stops at the first difference, printing the line number. It is slow, because `NaiveMatcher` scans its whole book. `--trades -` writes the trade log to stdout and moves the summary to stderr. Generated files (`*.events`, `*.trades`) are ignored by git. Exit codes: 0 success, 1 `--verify` found a difference, 2 bad usage or a malformed line, 3 a file could not be opened or written.
+
+For `--generate ... --events 1000000 --symbols 3 --seed 1` the replay gives 550,871 trades and the hash `0xde0a019985dd119f`. The events per second it prints includes file parsing and trade log output, so it is not comparable to `lob_latency`. Measurements are in [docs/RESULTS.md](docs/RESULTS.md).
+
 ## Results
 
 All four versions below were measured together, interleaved, in 5 rounds, with the median of each metric. Workload: 5,000,000 operations, seed 1, one pinned core, prices 90 to 110.
@@ -137,7 +167,7 @@ More detail on each choice is in [docs/DESIGN.md](docs/DESIGN.md), and my mistak
 
 - **Fixed price window.** Price levels live in a flat array over a window of ticks (default base 0, 4096 ticks). Prices outside it still work, through a `std::map`, but that is a slow path that allocates. On a price band of 1..2000, a window that missed the traffic was about 26% slower in throughput and 38% to 48% worse in p99. Nothing recenters the window. I did not measure windows far larger than 4096 ticks.
 - **One thread.** Each order book matches one symbol, and the `MatchingEngine` router runs all symbols on one thread. There is no multi-threading and no input queue (the SPSC ring buffer is not built). Order ids must be unique across symbols. I have not benchmarked the router, only a single `OrderBook`.
-- **No replay yet.** The benchmark uses a synthetic random order stream. Real market data replay is not built.
+- **No real market data.** `lob_replay` reads a simple CSV format that the repo defines. The benchmarks and the replay tool both use generated random orders. Reading a real exchange feed format (LOBSTER, for example) is not built.
 - **Simulated cache and branch numbers.** Without `perf`, the profile uses Valgrind. Its cache sizes are a model (no L2) and its branch predictor is crude. The time shares come from a cost model I did not check against hardware counters.
 - **WSL2 noise.** All timings are from WSL2. Native Linux would be better for final numbers.
 - **Synthetic workload.** The default workload draws prices from 90 to 110 and may flatter the flat price-level array.

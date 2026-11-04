@@ -1,0 +1,47 @@
+# Golden replay input, written by hand. Expected output: golden_trades.csv.
+# Symbols 10, 20 and 30. Order ids are global across symbols.
+
+# Symbol 10: three asks and a bid that does not cross.
+LIMIT,1,10,SELL,101,3
+LIMIT,2,10,SELL,101,2
+LIMIT,3,10,SELL,102,6
+LIMIT,4,10,BUY,100,5
+
+# Symbol 20: an ask at 100 that would hit symbol 10's bid at 100 if the books were shared.
+LIMIT,5,20,SELL,100,4
+LIMIT,6,20,BUY,99,4
+
+# A buy on symbol 10 sweeps ids 1, 2 and part of 3.
+LIMIT,7,10,BUY,102,8
+
+# Id 1 was filled completely, so it is free again, here on another symbol.
+LIMIT,1,20,BUY,100,1
+
+# Id 3 is still resting on symbol 10, so reusing it on symbol 20 is rejected.
+LIMIT,3,20,BUY,98,2
+
+# Market sell on symbol 20 takes the 4 at 99, the other 6 are dropped.
+MARKET,8,20,SELL,10
+
+# Cancel by id alone: id 3 is found on symbol 10. The second cancel finds nothing.
+CANCEL,3
+CANCEL,3
+
+# Modify by id alone: id 4 moves up to 101 and does not cross anything.
+MODIFY,4,101,5
+
+# A sell at 101 meets id 4 and the rest of it rests.
+LIMIT,9,10,SELL,101,7
+
+# Modify of an id that is not resting.
+MODIFY,99,100,1
+
+# Quantity 0 is rejected and creates no book for symbol 30. Then symbol 30 gets a real bid.
+LIMIT,10,30,BUY,50,0
+LIMIT,11,30,BUY,50,5
+
+# Id 9 moves to price 50 on symbol 10. It must not meet symbol 30's bid at 50.
+MODIFY,9,50,2
+
+# Market buy on a symbol that has never been seen: no liquidity, no book.
+MARKET,12,40,BUY,5

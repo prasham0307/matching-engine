@@ -621,3 +621,20 @@ duplicate and again to insert, `cancel` finds and then erases, and each fill era
 those into single-probe operations would trim both the id-index instructions and the book logic. After
 that, line-level profiling of `match_against` and `rest` (which are 87 and 42 instructions per op) is
 the way to find what the remaining 95 matching-loop instructions are spent on.
+
+## Replay tool (`lob_replay`)
+
+Not a latency result. These numbers say the tool works and how fast it runs end to end. The events per second below include reading and parsing the file, matching on the `MatchingEngine`, and formatting, hashing and writing the trade log. `lob_latency` times only the engine, per operation. The two figures are not comparable.
+
+Workload: `--generate million.events --events 1000000 --symbols 3 --seed 1`. The input file is 21,687,804 bytes (1,000,001 lines, one of them the header comment). The generator is the same `OrderGenerator` as the benchmarks (prices 90 to 110), with each new order assigned to one of 3 symbols.
+
+| Run | Result |
+|---|---|
+| Plain replay 1, `--trades` file, pinned to core 2 | 0.356 s, 2,812,036 events/s |
+| Plain replay 2, same, pinned to core 2 | 0.346 s, 2,888,967 events/s |
+| `--verify` (every event also through one `NaiveMatcher` per symbol), not pinned | passed, 8.0 s, 124,563 events/s |
+
+All three gave the same trade count (550,871) and the same trade log hash, `0xde0a019985dd119f`. The two plain runs wrote byte-for-byte identical trade logs (11,763,417 bytes, 550,871 lines). Other summary counts: 189,455 cancels and 75,982 modifies of an id that was not resting, 0 rejected orders, 0 resizes of the global id table, and 3303, 3461 and 3847 orders resting at the end on symbols 1, 2 and 3.
+
+Caveats: two timed runs on WSL2, not interleaved, so the 2.81M and 2.89M figures only show the order of magnitude. This machine has a slow state and a fast state (see Optimization 2 and 3), and I did not control for it here. The `--verify` run was not pinned and its time is dominated by `NaiveMatcher`. The tool and its tests are described in README.md.
+
