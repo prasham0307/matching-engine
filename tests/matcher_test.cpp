@@ -364,4 +364,95 @@ TEST(OrderBookDepth, IsRestingTracksLiveOrders) {
   EXPECT_FALSE(book.is_resting(2));
 }
 
+// A buffer pre-filled with junk, to prove OrderBook clears it rather than appending.
+Trades dirty_buffer() { return Trades(3, Trade{99, 99, 99, 99}); }
+
+TEST(OrderBookBuffer, EveryCallClearsTheBufferFirst) {
+  OrderBook book;
+
+  Trades out = dirty_buffer();
+  book.submit_limit(1, Side::Sell, 101, 3, out);  // rests, no trades
+  EXPECT_TRUE(out.empty());
+
+  out = dirty_buffer();
+  book.submit_limit(2, Side::Buy, 101, 2, out);
+  EXPECT_EQ(out, (Trades{{1, 2, 101, 2}}));
+
+  out = dirty_buffer();
+  book.submit_limit(3, Side::Buy, 105, 0, out);  // qty 0 rejected
+  EXPECT_TRUE(out.empty());
+
+  out = dirty_buffer();
+  book.submit_limit(1, Side::Buy, 105, 5, out);  // duplicate of a resting id rejected
+  EXPECT_TRUE(out.empty());
+
+  out = dirty_buffer();
+  book.submit_market(4, Side::Buy, 10, out);
+  EXPECT_EQ(out, (Trades{{1, 4, 101, 1}}));
+
+  out = dirty_buffer();
+  book.submit_market(5, Side::Buy, 0, out);  // qty 0 rejected
+  EXPECT_TRUE(out.empty());
+
+  out = dirty_buffer();
+  book.modify(77, 100, 5, out);  // unknown id
+  EXPECT_TRUE(out.empty());
+
+  book.submit_limit(6, Side::Sell, 102, 4, out);
+  book.submit_limit(7, Side::Buy, 100, 4, out);
+  out = dirty_buffer();
+  book.modify(7, 102, 4, out);  // crosses: fills against order 6
+  EXPECT_EQ(out, (Trades{{6, 7, 102, 4}}));
+
+  out = dirty_buffer();
+  book.modify(6, 103, 0, out);  // qty 0 cancels; nothing to report
+  EXPECT_TRUE(out.empty());
+}
+
+TEST(OrderBookBuffer, ReusedBufferKeepsItsCapacity) {
+  OrderBook book;
+  for (uint64_t i = 0; i < 20; ++i) book.submit_limit(i + 1, Side::Sell, 101, 1);
+
+  Trades out;
+  book.submit_market(100, Side::Buy, 20, out);  // 20 trades: the buffer grows once
+  ASSERT_EQ(out.size(), 20u);
+  const auto capacity = out.capacity();
+  const auto* data = out.data();
+
+  book.submit_limit(200, Side::Sell, 101, 3, out);
+  book.submit_limit(201, Side::Buy, 101, 3, out);  // 1 trade into the same buffer
+  EXPECT_EQ(out.size(), 1u);
+  EXPECT_EQ(out.capacity(), capacity);  // clear() kept the allocation
+  EXPECT_EQ(out.data(), data);          // and it was not reallocated
+}
+
+TEST(OrderBookBuffer, WrappersAgreeWithTheBufferApi) {
+  // The same script through the vector-returning wrappers and through the buffer API.
+  OrderBook wrapped, buffered;
+  Trades out;
+
+  EXPECT_TRUE(wrapped.submit_limit(1, Side::Sell, 101, 5).empty());
+  buffered.submit_limit(1, Side::Sell, 101, 5, out);
+  EXPECT_TRUE(out.empty());
+
+  EXPECT_EQ(wrapped.submit_limit(2, Side::Buy, 101, 2), (Trades{{1, 2, 101, 2}}));
+  buffered.submit_limit(2, Side::Buy, 101, 2, out);
+  EXPECT_EQ(out, (Trades{{1, 2, 101, 2}}));
+
+  EXPECT_EQ(wrapped.submit_market(3, Side::Buy, 9), (Trades{{1, 3, 101, 3}}));
+  buffered.submit_market(3, Side::Buy, 9, out);
+  EXPECT_EQ(out, (Trades{{1, 3, 101, 3}}));
+
+  EXPECT_TRUE(wrapped.submit_limit(4, Side::Buy, 100, 4).empty());
+  buffered.submit_limit(4, Side::Buy, 100, 4, out);
+  EXPECT_TRUE(out.empty());
+  EXPECT_TRUE(wrapped.modify(4, 100, 6).empty());
+  buffered.modify(4, 100, 6, out);
+  EXPECT_TRUE(out.empty());
+
+  EXPECT_EQ(wrapped.best_bid(), buffered.best_bid());
+  EXPECT_EQ(wrapped.best_ask(), buffered.best_ask());
+  EXPECT_EQ(wrapped.total_qty_at(Side::Buy, 100), buffered.total_qty_at(Side::Buy, 100));
+}
+
 }  // namespace

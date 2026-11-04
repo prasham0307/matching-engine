@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Break a callgrind profile of lob_latency into components.
 
-Usage: callgrind_breakdown.py CALLGRIND_OUT MEASURED_OPS
+Usage: callgrind_breakdown.py CALLGRIND_OUT MEASURED_OPS [--pooled]
+
+--pooled: Orders come from OrderPool, so none of the allocator work is for Order objects.
 
 Input is a callgrind.out (text) recorded with
   valgrind --tool=callgrind --collect-atstart=no --cache-sim=yes --branch-sim=yes
@@ -11,7 +13,7 @@ What is MEASURED (read straight from the profile): instruction counts, simulated
 simulated branch mispredicts, call counts, per-function self and inclusive cost, and self cost per
 source file (which separates inlined std::map / unordered_map / vector code).
 What is ESTIMATED: the 50/50 split of resting-order allocator work between the Order object and
-the unordered_map node, the split of one mixed delete bucket between vector<Trade> buffers and
+the unordered_map node (not applicable with --pooled), the split of one mixed delete bucket between vector<Trade> buffers and
 map nodes (by call counts), and every "est. cycles" number (a simple cost model, not hardware).
 """
 import collections
@@ -146,14 +148,17 @@ def main(path, ops):
               f"{(v[IX['Bcm']] + v[IX['Bim']]) / ops:>9.3f}")
 
     # Allocator work by who called operator new / delete (MEASURED call counts and inclusive Ir).
-    def callers(stub):
+    # The PLT stubs sit at link-dependent addresses, so find them from the call graph: a stub is
+    # whatever calls operator new / operator delete. Callers of the stubs are the real callers.
+    def callers(target):
+        stubs = {c for (c, d) in ed if d == target}
         rows = collections.defaultdict(lambda: [0, 0])
         for (c, d), e in ed.items():
-            if d == stub:
+            if d in stubs:
                 rows[c][0] += e[0]
                 rows[c][1] += e[1][0]
         return rows
-    new_rows, del_rows = callers('0x000000000010a480'), callers('0x000000000010a490')
+    new_rows, del_rows = callers('operator new(unsigned long)'), callers('operator delete(void*, unsigned long)')
     own = collections.defaultdict(float)   # owner -> Ir
     calls = collections.defaultdict(float)
     mixed_calls = mixed_ir = 0
@@ -193,12 +198,14 @@ def main(path, ops):
     # Components with allocator work attributed to the structure that owns the allocation.
     # ESTIMATE: resting-order lifecycle (2 allocations per order) split 50/50 Order vs hash node.
     life = own['resting order lifecycle']
+    # With --pooled the Order objects come from OrderPool, so the whole bucket is the id-index node.
+    order_share = 0.0 if POOLED else 0.5
     rows = [
-        ('unordered_map (own code + node allocs)', cats['unordered_map (id index)'][0] + life / 2),
+        ('unordered_map (own code + node allocs)', cats['unordered_map (id index)'][0] + life * (1 - order_share)),
         ('vector<Trade> (own code + buffer allocs)', cats['vector<Trade> logic'][0] + own['vector<Trade>']),
         ('matching loop + book logic', cats['matching loop + book logic'][0]),
         ('std::map (own code + node allocs)', cats['std::map (price levels)'][0] + own['std::map level nodes']),
-        ('Order objects (allocs only)', life / 2),
+        ('Order objects (allocs only)', life * order_share),
         ('glue/other (allocator wrappers, unique_ptr, memcpy, min)',
          cats['allocator/unique_ptr glue'][0] + cats['other (std::min/copy, memcpy, misc)'][0] + own['unattributed']),
         ('harness (not the engine)', cats['harness (apply wrapper, loop, checksum)'][0]),
@@ -237,10 +244,10 @@ def main(path, ops):
                                 own['vector<Trade>'] / alloc_total,
                                 own['std::map level nodes'] / alloc_total)
         attributed = {
-            'unordered_map (ops + its node allocs)': est['unordered_map ops (excl. allocation)'] + alloc_c * life_f / 2,
+            'unordered_map (ops + its node allocs)': est['unordered_map ops (excl. allocation)'] + alloc_c * life_f * (1 - order_share),
             'vector<Trade> (logic + buffer allocs)': est['vector<Trade> logic (excl. allocation)'] + alloc_c * vec_f,
             'std::map (ops + level node allocs)': est['std::map ops (excl. allocation)'] + alloc_c * map_f,
-            'Order objects (allocs only)': alloc_c * life_f / 2,
+            'Order objects (allocs only)': alloc_c * life_f * (1 - order_share),
             'matching loop + book logic': est['matching loop + book logic'],
             'glue/other': est['glue/other'],
         }
@@ -267,7 +274,11 @@ def main(path, ops):
             break
 
 
+POOLED = False
+
 if __name__ == '__main__':
-    if len(sys.argv) != 3:
+    args = [a for a in sys.argv[1:] if a != '--pooled']
+    POOLED = len(args) != len(sys.argv) - 1
+    if len(args) != 2:
         sys.exit(__doc__)
-    main(sys.argv[1], int(sys.argv[2]))
+    main(args[0], int(args[1]))

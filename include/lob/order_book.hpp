@@ -4,25 +4,48 @@
 #include <cstdint>
 #include <functional>
 #include <map>
-#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "lob/order_pool.hpp"
 #include "lob/types.hpp"
 
 namespace lob {
 
-// Single-symbol limit order book, v1. Price levels are ordered maps; each level is an
-// intrusive doubly linked FIFO of resting orders. Same public interface and rules as
-// NaiveMatcher, which it is tested against.
+// Single-symbol limit order book. Price levels are ordered maps; each level is an intrusive
+// doubly linked FIFO of resting orders, and the orders themselves come from an OrderPool. Same
+// public interface and rules as NaiveMatcher, which it is tested against.
 class OrderBook {
  public:
-  std::vector<Trade> submit_limit(uint64_t id, Side side, int64_t price, uint32_t qty);
-  std::vector<Trade> submit_market(uint64_t id, Side side, uint32_t qty);
+  // Hot-path API. Trades are written to `out`, which is cleared first and keeps its capacity, so
+  // a buffer reused across calls stops allocating once it has grown to the largest result.
+  // A rejected or non-matching call leaves `out` empty.
+  void submit_limit(uint64_t id, Side side, int64_t price, uint32_t qty,
+                    std::vector<Trade>& out);
+  void submit_market(uint64_t id, Side side, uint32_t qty, std::vector<Trade>& out);
+  void modify(uint64_t id, int64_t new_price, uint32_t new_qty, std::vector<Trade>& out);
+
   bool cancel(uint64_t id);
-  std::vector<Trade> modify(uint64_t id, int64_t new_price, uint32_t new_qty);
+
+  // Convenience wrappers that return a fresh vector. They allocate; use the overloads above on
+  // hot paths.
+  std::vector<Trade> submit_limit(uint64_t id, Side side, int64_t price, uint32_t qty) {
+    std::vector<Trade> out;
+    submit_limit(id, side, price, qty, out);
+    return out;
+  }
+  std::vector<Trade> submit_market(uint64_t id, Side side, uint32_t qty) {
+    std::vector<Trade> out;
+    submit_market(id, side, qty, out);
+    return out;
+  }
+  std::vector<Trade> modify(uint64_t id, int64_t new_price, uint32_t new_qty) {
+    std::vector<Trade> out;
+    modify(id, new_price, new_qty, out);
+    return out;
+  }
 
   std::optional<int64_t> best_bid() const;
   std::optional<int64_t> best_ask() const;
@@ -86,9 +109,10 @@ class OrderBook {
 
   void rest(uint64_t id, Side side, int64_t price, uint32_t qty, uint32_t remaining);
 
+  OrderPool pool_;  // owns the storage of every resting Order
   BidMap bids_;
   AskMap asks_;
-  std::unordered_map<uint64_t, std::unique_ptr<Order>> orders_;  // v1: heap allocated
+  std::unordered_map<uint64_t, Order*> orders_;  // id index; the Orders live in pool_
   uint64_t seq_ = 0;
 };
 

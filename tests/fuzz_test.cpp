@@ -74,6 +74,30 @@ Outcome apply(M& m, const Op& op) {
   return out;
 }
 
+// OrderBook through the hot-path API, with one buffer that lives for the whole run. If any call
+// failed to clear it, stale trades from an earlier operation would show up as a mismatch.
+Outcome apply(OrderBook& m, const Op& op, Trades& buffer) {
+  Outcome out;
+  switch (op.kind) {
+    case OpKind::Limit:
+      m.submit_limit(op.id, op.side, op.price, op.qty, buffer);
+      out.trades = buffer;
+      break;
+    case OpKind::Market:
+      m.submit_market(op.id, op.side, op.qty, buffer);
+      out.trades = buffer;
+      break;
+    case OpKind::Cancel:
+      out.cancelled = m.cancel(op.id);
+      break;  // buffer deliberately left dirty
+    case OpKind::Modify:
+      m.modify(op.id, op.price, op.qty, buffer);
+      out.trades = buffer;
+      break;
+  }
+  return out;
+}
+
 std::string describe(const Op& op) {
   std::ostringstream os;
   const char* side = op.side == Side::Buy ? "BUY" : "SELL";
@@ -139,6 +163,7 @@ std::string run_seed(uint64_t seed, uint64_t n, Stats& stats) {
   OrderGenerator gen(cfg);
   NaiveMatcher naive;
   OrderBook book;
+  Trades buffer;                               // reused by every OrderBook call
   std::deque<std::pair<uint64_t, Op>> recent;  // last 10 operations
 
   for (uint64_t i = 0; i < n; ++i) {
@@ -151,7 +176,7 @@ std::string run_seed(uint64_t seed, uint64_t n, Stats& stats) {
     const bool was_resting = naive.is_resting(op.id);
 
     const Outcome a = apply(naive, op);
-    const Outcome b = apply(book, op);
+    const Outcome b = apply(book, op, buffer);
 
     ++stats.ops;
     stats.trades += a.trades.size();

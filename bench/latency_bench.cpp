@@ -2,9 +2,9 @@
 //
 // Method: all operations are generated before any timing starts. A warm-up prefix is run on a
 // fresh book and its timings are discarded; each measured operation is then timed on its own
-// with steady_clock into a preallocated vector. The trade vector an operation returns is
-// created inside the timed region (the engine's allocation is part of what is measured) and
-// destroyed after it. Reports percentiles, not averages.
+// with steady_clock into a preallocated vector. One Result (and so one trade buffer) is reused
+// for every operation, so the harness itself never allocates inside the timed loop. Reports
+// percentiles, not averages.
 #include <sched.h>
 
 #include <algorithm>
@@ -20,7 +20,6 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
-#include <utility>
 #include <vector>
 
 #include "lob/order_book.hpp"
@@ -34,7 +33,7 @@
 
 // Profiling builds only (-DLOB_CALLGRIND): bracket the engine's work with Callgrind collect
 // toggles so a `valgrind --tool=callgrind --collect-atstart=no` profile contains only the
-// order book (the operation and the destruction of its returned trades), not the harness setup.
+// order book's work for each operation, not the harness setup.
 // Without the define these expand to nothing and the code is identical to the normal build.
 #ifdef LOB_CALLGRIND
 #include <valgrind/callgrind.h>
@@ -180,23 +179,24 @@ struct Result {
   bool cancelled = false;
 };
 
-Result apply(OrderBook& book, const Op& op) {
-  Result r;
+// Runs one operation into the caller's reusable Result. The order book clears r.trades itself.
+void apply(OrderBook& book, const Op& op, Result& r) {
+  r.cancelled = false;
   switch (op.kind) {
     case OpKind::Limit:
-      r.trades = book.submit_limit(op.id, op.side, op.price, op.qty);
+      book.submit_limit(op.id, op.side, op.price, op.qty, r.trades);
       break;
     case OpKind::Market:
-      r.trades = book.submit_market(op.id, op.side, op.qty);
+      book.submit_market(op.id, op.side, op.qty, r.trades);
       break;
     case OpKind::Cancel:
+      r.trades.clear();
       r.cancelled = book.cancel(op.id);
       break;
     case OpKind::Modify:
-      r.trades = book.modify(op.id, op.price, op.qty);
+      book.modify(op.id, op.price, op.qty, r.trades);
       break;
   }
-  return r;
 }
 
 // Order-sensitive so a change in matching order or results changes the checksum.
@@ -257,7 +257,12 @@ int main(int argc, char** argv) {
   // 2. Warm-up on a fresh book, timings discarded.
   OrderBook book;
   uint64_t sink = 0;
-  for (uint64_t i = 0; i < opt.warmup; ++i) sink = fold(sink, apply(book, ops[i]));
+  Result result;
+  result.trades.reserve(64);  // the generator's quantities cap one op at 20 trades
+  for (uint64_t i = 0; i < opt.warmup; ++i) {
+    apply(book, ops[i], result);
+    sink = fold(sink, result);
+  }
 
   // 3. Measured loop. latencies is preallocated; nothing in the loop allocates in the harness.
   std::vector<uint64_t> latencies(opt.ops);
@@ -268,18 +273,13 @@ int main(int argc, char** argv) {
     const Op& op = ops[opt.warmup + i];
     const auto t0 = Clock::now();
     LOB_PROFILE_TOGGLE();
-    Result r = apply(book, op);
+    apply(book, op, result);
     LOB_PROFILE_TOGGLE();
     const auto t1 = Clock::now();
     latencies[i] = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
-    checksum = fold(checksum, r);
-    trade_count += r.trades.size();
-#ifdef LOB_CALLGRIND
-    LOB_PROFILE_TOGGLE();
-    { const Result dead = std::move(r); }  // include freeing the trade vector in the profile
-    LOB_PROFILE_TOGGLE();
-#endif
+    checksum = fold(checksum, result);
+    trade_count += result.trades.size();
   }
   const auto loop_end = Clock::now();
   const int cpu_after = sched_getcpu();

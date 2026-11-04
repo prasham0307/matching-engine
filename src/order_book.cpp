@@ -24,9 +24,10 @@ uint32_t OrderBook::match_against(Map& book, uint64_t takerId, bool takerIsBuy,
       maker->remaining -= fill;
       level.totalQty -= fill;
       if (maker->remaining == 0) {
-        const uint64_t makerId = maker->id;  // copy: erase destroys the Order
+        const uint64_t makerId = maker->id;  // copy: the slot is recycled right after
         level.unlink(maker);
         orders_.erase(makerId);
+        pool_.release(maker);
       }
     }
     if (level.head == nullptr) book.erase(it);  // never leave an empty level behind
@@ -35,45 +36,43 @@ uint32_t OrderBook::match_against(Map& book, uint64_t takerId, bool takerIsBuy,
 }
 
 void OrderBook::rest(uint64_t id, Side side, int64_t price, uint32_t qty, uint32_t remaining) {
-  auto owned = std::make_unique<Order>(Order{id, 0, side, price, qty, remaining, ++seq_});
-  Order* o = owned.get();
+  Order* o = pool_.allocate(Order{id, 0, side, price, qty, remaining, ++seq_});
   if (side == Side::Buy) {
     bids_[price].push_back(o);
   } else {
     asks_[price].push_back(o);
   }
-  orders_.emplace(id, std::move(owned));
+  orders_.emplace(id, o);
 }
 
-std::vector<Trade> OrderBook::submit_limit(uint64_t id, Side side, int64_t price, uint32_t qty) {
-  std::vector<Trade> trades;
-  if (qty == 0 || orders_.contains(id)) return trades;
+void OrderBook::submit_limit(uint64_t id, Side side, int64_t price, uint32_t qty,
+                             std::vector<Trade>& out) {
+  out.clear();
+  if (qty == 0 || orders_.contains(id)) return;
 
   const uint32_t left = (side == Side::Buy)
-                            ? match_against(asks_, id, true, price, qty, trades)
-                            : match_against(bids_, id, false, price, qty, trades);
+                            ? match_against(asks_, id, true, price, qty, out)
+                            : match_against(bids_, id, false, price, qty, out);
   if (left > 0) rest(id, side, price, qty, left);
-  return trades;
 }
 
-std::vector<Trade> OrderBook::submit_market(uint64_t id, Side side, uint32_t qty) {
-  std::vector<Trade> trades;
-  if (qty == 0 || orders_.contains(id)) return trades;
+void OrderBook::submit_market(uint64_t id, Side side, uint32_t qty, std::vector<Trade>& out) {
+  out.clear();
+  if (qty == 0 || orders_.contains(id)) return;
 
   // Unfilled remainder is dropped, never rested.
   if (side == Side::Buy) {
-    match_against(asks_, id, true, std::nullopt, qty, trades);
+    match_against(asks_, id, true, std::nullopt, qty, out);
   } else {
-    match_against(bids_, id, false, std::nullopt, qty, trades);
+    match_against(bids_, id, false, std::nullopt, qty, out);
   }
-  return trades;
 }
 
 bool OrderBook::cancel(uint64_t id) {
   const auto found = orders_.find(id);
   if (found == orders_.end()) return false;
 
-  Order* o = found->second.get();
+  Order* o = found->second;
   if (o->side == Side::Buy) {
     const auto it = bids_.find(o->price);
     it->second.unlink(o);
@@ -84,16 +83,19 @@ bool OrderBook::cancel(uint64_t id) {
     if (it->second.head == nullptr) asks_.erase(it);
   }
   orders_.erase(found);
+  pool_.release(o);
   return true;
 }
 
-std::vector<Trade> OrderBook::modify(uint64_t id, int64_t new_price, uint32_t new_qty) {
+void OrderBook::modify(uint64_t id, int64_t new_price, uint32_t new_qty,
+                       std::vector<Trade>& out) {
+  out.clear();
   const auto found = orders_.find(id);
-  if (found == orders_.end()) return {};
+  if (found == orders_.end()) return;
 
   const Side side = found->second->side;
   cancel(id);
-  return submit_limit(id, side, new_price, new_qty);  // qty 0 is rejected: order stays cancelled
+  submit_limit(id, side, new_price, new_qty, out);  // qty 0 is rejected: order stays cancelled
 }
 
 std::optional<int64_t> OrderBook::best_bid() const {
@@ -143,7 +145,7 @@ bool OrderBook::check_side(const Map& book, Side side, std::size_t& counted) con
     for (const Order* o = level.head; o != nullptr; o = o->next) {
       if (++counted > orders_.size()) return false;  // cycle, or orders missing from the map
       const auto it = orders_.find(o->id);
-      if (it == orders_.end() || it->second.get() != o) return false;
+      if (it == orders_.end() || it->second != o) return false;
       if (o->side != side || o->price != price) return false;
       if (o->remaining == 0 || o->remaining > o->qty) return false;
       if (o->prev != prev) return false;  // backward link must mirror the forward walk
@@ -163,6 +165,8 @@ bool OrderBook::check_invariants() const {
 
   // Every order in the id map must have been reached through exactly one level.
   if (counted != orders_.size()) return false;
+  // The pool must hold exactly the orders the id index knows about: nothing leaked or freed early.
+  if (pool_.in_use() != orders_.size()) return false;
   for (const auto& [id, order] : orders_) {
     if (order == nullptr || order->id != id) return false;
   }

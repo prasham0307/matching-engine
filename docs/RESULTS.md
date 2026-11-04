@@ -25,8 +25,10 @@ harness, seed and operation count so rows are comparable.
   recent ids).
 - All operations are generated into a vector before any timing starts.
 - Each measured operation is timed on its own with `std::chrono::steady_clock` into a
-  preallocated vector. The trade vector an operation returns is built inside the timed region
-  (the engine's allocation counts) and destroyed after it.
+  preallocated vector. Up to and including the baseline row, the trade vector an operation
+  returned was built inside the timed region (the engine's allocation counted) and destroyed
+  after it. From the pooling row onward the harness reuses one trade buffer for every op, as the
+  engine's buffer API is meant to be used.
 - Percentiles, not averages (nearest-rank). Raw values: the median cost of the timer itself
   (two back-to-back `now()` calls, about 26 ns here) is reported but **not subtracted**.
 - Throughput is measured operations divided by the wall time of the whole measured loop, so it
@@ -51,6 +53,7 @@ Reproduce:
 | Date | Change | Commit | p50 | p99 | p99.9 | Orders/sec | Notes |
 |---|---|---|---|---|---|---|---|
 | 2026-11-04 | baseline: std::map + unique_ptr orders | e5f469b | 142 ns | 890 ns | 1,719 ns | 3.89M | Median of 3 runs. 2,811,186 trades, 81,137 resting orders at end, checksum 002f8ec71a31eeb9, timer overhead 26 ns |
+| 2026-11-04 | pool Orders + reuse trade buffer | (this commit) | 135 ns | 583 ns | 1,081 ns | 4.54M | Median of 5 runs per metric, not one run. Same-session before: p50 158, p99 970, p99.9 1,733, 3.59M ops/s. Before and after ranges do not overlap. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 1" below |
 
 ## Baseline runs (run-to-run variation)
 
@@ -97,7 +100,7 @@ Reproduce:
     python3 tools/callgrind_breakdown.py callgrind.out 5000000
 
 Raw reports are in `docs/profiles/` (`callgrind_5m*.txt`, `callgrind_200k*.txt`,
-`cachegrind_*_summary.txt`, and the raw `callgrind_*.out` files the script reads).
+`cachegrind_*_summary.txt`, and the raw `callgrind_*.callgrind` profiles the script reads).
 
 ### Machine-level picture (5M ops, engine only)
 
@@ -230,3 +233,75 @@ add up and none of them is a promised gain.
   validate here. Use the shares, not the cycle counts.
 - Different book sizes change cache behavior but not instruction counts: 200k and 5M ops both
   give 596 Ir/op. D1 miss rate rose from 0.61% to 0.73% between them.
+
+## Optimization 1: pool Orders, reuse the trade buffer
+
+Change: `Order` objects come from an `OrderPool` (4096-slot chunks, free list threaded through
+the unused `Order::next`, stable addresses, no per-order `new`/`delete` once the pool has grown
+to the peak number of simultaneously resting orders). `submit_limit`, `submit_market` and
+`modify` write into a caller-supplied `std::vector<Trade>` that is cleared and reused; the old
+vector-returning functions remain as thin wrappers. The id index (`unordered_map`, now mapping to
+`Order*`) and the `std::map` levels are untouched, as is `NaiveMatcher`. Under ASan the pool
+poisons released slots, so a read of a released order is still reported (checked with a scratch
+program).
+
+Behavior is identical: the checksum is `002f8ec71a31eeb9` in all 10 runs below, the fuzz test
+(6 seeds at default sizes, `OrderBook` driven through one long-lived reused buffer) passes in
+Debug with ASan/UBSan and in Release, and trade and resting-order counts are unchanged.
+
+### Latency and throughput (Release, pinned core 2, 5M ops, seed 1, 5 runs each, same session)
+
+| Metric | Before: median (min to max) | After: median (min to max) | Change of median |
+|---|---|---|---|
+| p50 | 158 ns (146 to 166) | 135 ns (129 to 142) | -14.6% |
+| p90 | 444 ns (416 to 465) | 292 ns (276 to 324) | -34.2% |
+| p99 | 970 ns (910 to 999) | 583 ns (527 to 660) | -39.9% |
+| p99.9 | 1,733 ns (1,703 to 6,954) | 1,081 ns (968 to 1,222) | -37.6% |
+| Orders/sec | 3.59M (3.44M to 3.73M) | 4.54M (4.27M to 4.83M) | +26.4% |
+
+For every metric the before range and the after range do not overlap, and each change is larger
+than the spread within a run set (spread of throughput: about 8% before, 12% after). The one
+before-run p99.9 of 6,954 ns is a WSL2 outlier; the median ignores it.
+
+Compare only within a session. The baseline row was measured earlier the same day at 3.89M
+ops/s with the same binary behavior; the "before" runs here, on the same code, gave a 3.59M
+median, so machine state drifts by roughly 8% between sessions.
+
+### Engine-only profile (Callgrind, same method as the baseline profile)
+
+| | Before | After |
+|---|---|---|
+| Instructions per op | 596 | 374 (200k ops), 375 (5M ops) |
+| Allocator calls per op | 3.35 (200k), 3.18 (5M) | 1.35 (200k), 1.27 (5M) |
+| Allocator instructions per op | 257 | 104 |
+| Simulated L1 data misses per op | 1.70 (200k), 2.03 (5M) | 1.51 (200k), 2.03 (5M) |
+
+What still allocates (5M, per op): 0.78 calls for the id-index node (about 0.39 new and 0.39
+delete, one pair per resting order) and 0.49 for `std::map` level nodes. Those are exactly the
+two structures this change left alone. `vector<Trade>` and `Order` allocations are at zero.
+
+Engine instruction share after the change (5M): `unordered_map` with its node allocations 37.7%,
+matching loop 27.8%, `std::map` with its node allocations 26.0%, glue and other 6.1%,
+`vector<Trade>` 1.8%. By the same cost model as the baseline profile (an estimate, not hardware
+validated) the engine goes from about 312 to about 231 cycles per op, a 26% reduction, which
+agrees with the measured throughput gain.
+
+### Notes and surprises
+
+- **Allocator calls fell to 1.3 per op, not the roughly 2 expected.** Only about 0.42 orders
+  rest per op, so the id-index node costs about 0.39 new plus 0.39 delete per op. The earlier
+  estimate counted one node allocation per op instead of per resting order.
+- **Instructions fell 37% but throughput rose 26%.** Simulated L1 data misses per op did not
+  move at 5M (2.03 before and after), and half of them are `unordered_map` lookups, which this
+  change did not touch. Memory behavior of the id index is now a larger share of what is left.
+- **The tail improved more than the median** (p99 -40%, p99.9 -38%, p50 -15%). Allocation cost
+  is spiky (malloc slow paths, vector growth, free consolidation), so removing it helps the
+  slow operations most.
+- The pool never shrinks: its footprint stays at the peak number of simultaneously resting
+  orders. That is the intended trade for no per-order heap traffic.
+- The "before" runs use the baseline harness behavior (vector returned per op, allocated inside
+  the timed region) and the "after" runs reuse one buffer, so the measured gain includes both
+  halves of the change, as the task intended.
+- Raw reports for the after-profile are in `docs/profiles/after_pool_*` (the `.callgrind` files
+  are the raw profiles; regenerate the breakdowns with `tools/callgrind_breakdown.py FILE OPS
+  --pooled`).

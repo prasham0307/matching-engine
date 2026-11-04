@@ -70,3 +70,6 @@ Testing/
 # Explicit build dirs
 build-debug/
 build-release/
+
+# Python bytecode
+__pycache__/

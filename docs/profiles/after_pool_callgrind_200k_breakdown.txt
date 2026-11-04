@@ -1,0 +1,79 @@
+profile: after_callgrind200k.out
+measured ops: 200,000
+
+== totals (MEASURED, engine region only; cache/branch numbers are simulated) ==
+instructions       74,741,737  = 374 per op   (loads 106/op, stores 69/op)
+L1 data misses     302,666  = 1.51/op  (0.87% of data refs)  [sim D1 48 KB 12-way]
+LL data misses     2,149  = 0.011/op  (0.006% of data refs)  [sim LL 24 MB 12-way]
+  of which in apply() = harness reading the op array: 0 (0.0%); engine only: 0.011/op
+I1 / LL instr misses 7 / 7
+cond branches      48.3/op, simulated mispredicts 5.24/op (10.9%)  [Valgrind's predictor is crude; real hardware predicts better]
+
+== component table (MEASURED self cost, classified by function / inlined source file) ==
+component                                              Ir/op    %Ir  D1m/op  misp/op
+heap allocator (malloc/free/operator new/delete)       105.8  28.3%   0.029    1.029
+matching loop + book logic                              96.6  25.8%   0.035    1.414
+unordered_map (id index)                                65.2  17.4%   0.620    1.291
+std::map (price levels)                                 51.8  13.9%   0.005    1.382
+harness (apply wrapper, loop, checksum)                 27.8   7.4%   0.625    0.524
+other (std::min/copy, memcpy, misc)                     18.8   5.0%   0.199    0.000
+vector<Trade> logic                                      6.2   1.7%   0.000    0.328
+allocator/unique_ptr glue                                1.6   0.4%   0.000    0.000
+
+== allocator work by owner (calls MEASURED; the vector/map split of one delete bucket is an ESTIMATE) ==
+  resting order lifecycle       0.83 calls/op    65.2 Ir/op  17.4%
+  std::map level nodes          0.52 calls/op    38.7 Ir/op  10.4%
+  unattributed                  0.00 calls/op     0.0 Ir/op   0.0%
+  vector<Trade>                 0.00 calls/op     0.0 Ir/op   0.0%
+  total                         1.35 calls/op   103.9 Ir/op  27.8%
+
+== components with allocator work attributed to the owning structure ==
+component                                                    Ir/op    %Ir  %engine Ir
+unordered_map (own code + node allocs)                       130.4  34.9%       37.7%
+matching loop + book logic                                    96.6  25.8%       27.9%
+std::map (own code + node allocs)                             90.5  24.2%       26.2%
+harness (not the engine)                                      27.8   7.4%            
+glue/other (allocator wrappers, unique_ptr, memcpy, min)      20.4   5.5%        5.9%
+vector<Trade> (own code + buffer allocs)                       6.2   1.7%        1.8%
+Order objects (allocs only)                                    0.0   0.0%        0.0%
+
+== ESTIMATED share of engine time (model: 0.35 cycle/instr + 14/L1 miss + 250/LL miss + 15/mispredict; harness excluded; NOT hardware-validated) ==
+  matching loop + book logic                  25.5%
+  heap allocation, all owners                 24.9%
+  unordered_map ops (excl. allocation)        23.4%
+  std::map ops (excl. allocation)             17.9%
+  glue/other                                   5.1%
+  vector<Trade> logic (excl. allocation)       3.3%
+  model total 218 cycles/op
+
+== ESTIMATED share of engine time with allocation attributed to the owning structure ==
+  unordered_map (ops + its node allocs)       39.0%
+  std::map (ops + level node allocs)          27.2%
+  matching loop + book logic                  25.5%
+  Order objects (allocs only)                 15.6%
+  glue/other                                   5.1%
+  vector<Trade> (logic + buffer allocs)        3.3%
+
+== top 10 functions by SELF cost (inlined callee code merged into the function) ==
+   59.0 Ir/op  15.8%  lob::OrderBook::rest(unsigned long, lob::Side, long, unsigned int, unsigned in
+   38.5 Ir/op  10.3%  lob::OrderBook::submit_limit(unsigned long, lob::Side, long, unsigned int, std
+   34.1 Ir/op   9.1%  _int_free
+   32.0 Ir/op   8.6%  unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::Pric
+   31.9 Ir/op   8.5%  unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::Pric
+   28.0 Ir/op   7.5%  malloc
+   20.6 Ir/op   5.5%  (anonymous namespace)::apply(lob::OrderBook&, lob::Op const&, (anonymous names
+   18.8 Ir/op   5.0%  free
+   13.8 Ir/op   3.7%  lob::OrderBook::cancel(unsigned long)
+   13.0 Ir/op   3.5%  unordered_map::_M_erase(unsigned long, std::__detail::_Hash_node_base*, std::_
+
+== top 10 functions by INCLUSIVE cost (PLT stubs and program entry points omitted) ==
+  365.7 Ir/op  97.9%  (anonymous namespace)::apply(lob::OrderBook&, lob::Op const&, (anonymous names
+  272.3 Ir/op  72.9%  lob::OrderBook::submit_limit(unsigned long, lob::Side, long, unsigned int, std
+  135.3 Ir/op  36.2%  lob::OrderBook::rest(unsigned long, lob::Side, long, unsigned int, unsigned in
+   68.6 Ir/op  18.4%  unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::Pric
+   68.2 Ir/op  18.2%  unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::Pric
+   57.8 Ir/op  15.5%  operator delete(void*, unsigned long)
+   55.3 Ir/op  14.8%  operator delete(void*)
+   52.9 Ir/op  14.2%  free
+   49.1 Ir/op  13.1%  unordered_map::_M_erase(unsigned long, std::__detail::_Hash_node_base*, std::_
+   43.7 Ir/op  11.7%  operator new(unsigned long)
