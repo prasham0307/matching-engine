@@ -1,0 +1,48 @@
+--------------------------------------------------------------------------------
+Profile data file 'callgrind.out' (creator: callgrind-3.22.0)
+--------------------------------------------------------------------------------
+I1 cache: 65536 B, 64 B, 16-way associative
+D1 cache: 49152 B, 64 B, 12-way associative
+LL cache: 25165824 B, 64 B, 12-way associative
+Timerange: Basic block 0 - 78570034
+Trigger: Program termination
+Profiled target:  ./build-profile/bench/lob_latency --ops 200000 --warmup 20000 --seed 1 (PID 20169, part 1)
+Events recorded:  Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw Bc Bcm Bi Bim
+Events shown:     Ir D1mr DLmr Bcm
+Event sort order: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw Bc Bcm Bi Bim
+Thresholds:       99 0 0 0 0 0 0 0 0 0 0 0 0
+Include dirs:     
+User annotated:   
+Auto-annotation:  on
+
+--------------------------------------------------------------------------------
+Ir                   D1mr             DLmr       Bcm                
+--------------------------------------------------------------------------------
+122,808,922 (100.0%) 324,132 (100.0%) 4 (100.0%) 1,208,166 (100.0%)  PROGRAM TOTALS
+
+--------------------------------------------------------------------------------
+Ir                  D1mr             DLmr       Bcm               file:function
+--------------------------------------------------------------------------------
+16,960,787 (13.81%)     268 ( 0.08%) 0           36,343 ( 3.01%)  ./malloc/./malloc/malloc.c:_int_free [/usr/lib/x86_64-linux-gnu/libc.so.6]
+13,992,246 (11.39%)     747 ( 0.23%) 0           12,472 ( 1.03%)  ./malloc/./malloc/malloc.c:malloc [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 8,530,564 ( 6.95%)   1,735 ( 0.54%) 0           27,156 ( 2.25%)  ./malloc/./malloc/malloc.c:free [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 6,901,008 ( 5.62%) 125,007 (38.57%) 0          112,158 ( 9.28%)  bench/latency_bench.cpp:(anonymous namespace)::apply(lob::OrderBook&, lob::Op const&) [/mnt/d/Projects/matching-engine/build-profile/bench/lob_l
+ 5,337,085 ( 4.35%)       2 ( 0.00%) 0           56,572 ( 4.68%)  src/order_book.cpp:lob::OrderBook::submit_limit(unsigned long, lob::Side, long, unsigned int) [/mnt/d/Projects/matching-engine/build-profile/ben
+ 4,975,024 ( 4.05%)       0          0                .           ???:operator new(unsigned long) [/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33]
+ 3,993,316 ( 3.25%)      10 ( 0.00%) 0           76,646 ( 6.34%)  src/order_book.cpp:unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::PriceLevel, std::greater<long>, std::allocator<std:
+ 3,940,557 ( 3.21%)      13 ( 0.00%) 0           77,536 ( 6.42%)  src/order_book.cpp:unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::PriceLevel, std::less<long>, std::allocator<std::pa
+ 2,779,704 ( 2.26%)       1 ( 0.00%) 0           81,658 ( 6.76%)  /usr/include/c++/13/bits/hashtable.h:lob::OrderBook::rest(unsigned long, lob::Side, long, unsigned int, unsigned int)
+ 2,695,210 ( 2.19%)       6 ( 0.00%) 0           33,427 ( 2.77%)  src/order_book.cpp:lob::OrderBook::rest(unsigned long, lob::Side, long, unsigned int, unsigned int) [/mnt/d/Projects/matching-engine/build-profi
+ 2,516,670 ( 2.05%)       0          0           49,265 ( 4.08%)  /usr/include/c++/13/bits/hashtable.h:std::_Hashtable<unsigned long, std::pair<unsigned long const, std::unique_ptr<lob::Order, std::default_dele
+ 2,248,067 ( 1.83%)      67 ( 0.02%) 0           44,992 ( 3.72%)  ???:std::_Rb_tree_rebalance_for_erase(std::_Rb_tree_node_base*, std::_Rb_tree_node_base&) [/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33]
+ 2,000,000 ( 1.63%)       0          .                .           bench/latency_bench.cpp:main [/mnt/d/Projects/matching-engine/build-profile/bench/lob_latency]
+ 1,987,564 ( 1.62%)      63 ( 0.02%) 0          110,526 ( 9.15%)  /usr/include/c++/13/bits/stl_tree.h:lob::OrderBook::rest(unsigned long, lob::Side, long, unsigned int, unsigned int)
+ 1,834,034 ( 1.49%)      27 ( 0.01%) 0           45,997 ( 3.81%)  ???:std::_Rb_tree_insert_and_rebalance(bool, std::_Rb_tree_node_base*, std::_Rb_tree_node_base*, std::_Rb_tree_node_base&) [/usr/lib/x86_64-linu
+ 1,782,073 ( 1.45%)       3 ( 0.00%) 0           23,055 ( 1.91%)  /usr/include/c++/13/bits/stl_vector.h:(anonymous namespace)::apply(lob::OrderBook&, lob::Op const&)
+ 1,663,776 ( 1.35%)   2,961 ( 0.91%) 0            8,555 ( 0.71%)  ./malloc/./malloc/malloc.c:_int_malloc [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 1,644,412 ( 1.34%)  47,944 (14.79%) 0           75,519 ( 6.25%)  /usr/include/c++/13/bits/hashtable.h:lob::OrderBook::submit_limit(unsigned long, lob::Side, long, unsigned int)
+ 1,465,564 ( 1.19%)       0          0                4 ( 0.00%)  /usr/include/c++/13/bits/stl_vector.h:main
+ 1,232,219 ( 1.00%)       3 ( 0.00%) 0               18 ( 0.00%)  ???:std::__detail::_Prime_rehash_policy::_M_need_rehash(unsigned long, unsigned long, unsigned long) const [/usr/lib/x86_64-linux-gnu/libstdc++.
+ 1,164,758 ( 0.95%)       0          0                .           /usr/include/c++/13/bits/new_allocator.h:unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::PriceLevel, std::less<long>, 
+ 1,155,090 ( 0.94%)       0          .                .           /usr/include/c++/13/bits/unique_ptr.h:lob::OrderBook::rest(unsigned long, lob::Side, long, unsigned int, unsigned int)
+ 1,139,996 ( 0.93%)       0          0                .           /usr/include/c++/13/bits/new_allocator.h:unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::PriceLevel, std::greater<long

@@ -1,0 +1,12 @@
+Command: ./build-profile/bench/lob_latency --ops 200000 --warmup 20000 --seed 1
+I refs:        334,734,328
+I1  misses:          3,027
+LLi misses:          2,923
+D refs:        142,728,279  (85,369,843 rd   + 57,358,436 wr)
+D1  misses:      1,699,945  ( 1,215,796 rd   +    484,149 wr)
+LLd misses:        328,732  (     7,792 rd   +    320,940 wr)
+D1  miss rate:         1.2% (       1.4%     +        0.8%  )
+LLd miss rate:         0.2% (       0.0%     +        0.6%  )
+LL refs:         1,702,972  ( 1,218,823 rd   +    484,149 wr)
+LL misses:         331,655  (    10,715 rd   +    320,940 wr)
+LL miss rate:          0.1% (       0.0%     +        0.6%  )

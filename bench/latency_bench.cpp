@@ -20,6 +20,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "lob/order_book.hpp"
@@ -29,6 +30,17 @@
 #define LOB_COMPILER_NAME "clang "
 #else
 #define LOB_COMPILER_NAME "g++ "
+#endif
+
+// Profiling builds only (-DLOB_CALLGRIND): bracket the engine's work with Callgrind collect
+// toggles so a `valgrind --tool=callgrind --collect-atstart=no` profile contains only the
+// order book (the operation and the destruction of its returned trades), not the harness setup.
+// Without the define these expand to nothing and the code is identical to the normal build.
+#ifdef LOB_CALLGRIND
+#include <valgrind/callgrind.h>
+#define LOB_PROFILE_TOGGLE() CALLGRIND_TOGGLE_COLLECT
+#else
+#define LOB_PROFILE_TOGGLE() ((void)0)
 #endif
 
 #ifndef LOB_BUILD_TYPE
@@ -255,12 +267,19 @@ int main(int argc, char** argv) {
   for (uint64_t i = 0; i < opt.ops; ++i) {
     const Op& op = ops[opt.warmup + i];
     const auto t0 = Clock::now();
+    LOB_PROFILE_TOGGLE();
     Result r = apply(book, op);
+    LOB_PROFILE_TOGGLE();
     const auto t1 = Clock::now();
     latencies[i] = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
     checksum = fold(checksum, r);
     trade_count += r.trades.size();
+#ifdef LOB_CALLGRIND
+    LOB_PROFILE_TOGGLE();
+    { const Result dead = std::move(r); }  // include freeing the trade vector in the profile
+    LOB_PROFILE_TOGGLE();
+#endif
   }
   const auto loop_end = Clock::now();
   const int cpu_after = sched_getcpu();

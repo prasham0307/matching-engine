@@ -1,0 +1,48 @@
+--------------------------------------------------------------------------------
+Profile data file 'callgrind.out' (creator: callgrind-3.22.0)
+--------------------------------------------------------------------------------
+I1 cache: 65536 B, 64 B, 16-way associative
+D1 cache: 49152 B, 64 B, 12-way associative
+LL cache: 25165824 B, 64 B, 12-way associative
+Timerange: Basic block 0 - 78570034
+Trigger: Program termination
+Profiled target:  ./build-profile/bench/lob_latency --ops 200000 --warmup 20000 --seed 1 (PID 20169, part 1)
+Events recorded:  Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw Bc Bcm Bi Bim
+Events shown:     Ir D1mr DLmr Bcm
+Event sort order: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw Bc Bcm Bi Bim
+Thresholds:       99 0 0 0 0 0 0 0 0 0 0 0 0
+Include dirs:     
+User annotated:   
+Auto-annotation:  on
+
+--------------------------------------------------------------------------------
+Ir                   D1mr             DLmr       Bcm                
+--------------------------------------------------------------------------------
+122,808,922 (100.0%) 324,132 (100.0%) 4 (100.0%) 1,208,166 (100.0%)  PROGRAM TOTALS
+
+--------------------------------------------------------------------------------
+Ir                   D1mr             DLmr       Bcm                 file:function
+--------------------------------------------------------------------------------
+122,808,922 (100.0%) 324,132 (100.0%) 4 (100.0%) 1,208,166 (100.0%)  ./csu/../csu/libc-start.c:__libc_start_main@@GLIBC_2.34 [/usr/lib/x86_64-linux-gnu/libc.so.6]
+122,808,922 (100.0%) 324,132 (100.0%) 4 (100.0%) 1,208,166 (100.0%)  ./csu/../sysdeps/nptl/libc_start_call_main.h:(below main) [/usr/lib/x86_64-linux-gnu/libc.so.6]
+122,808,922 (100.0%) 324,132 (100.0%) 4 (100.0%) 1,208,166 (100.0%)  /mnt/d/Projects/matching-engine/bench/latency_bench.cpp:main
+122,808,922 (100.0%) 324,132 (100.0%) 4 (100.0%) 1,208,166 (100.0%)  ???:(below main) [/mnt/d/Projects/matching-engine/build-profile/bench/lob_latency]
+122,808,922 (100.0%) 324,132 (100.0%) 4 (100.0%) 1,208,166 (100.0%)  ???:0x000000000001f540 [/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2]
+111,446,002 (90.75%) 324,077 (99.98%) 4 (100.0%) 1,196,038 (99.00%)  bench/latency_bench.cpp:main [/mnt/d/Projects/matching-engine/build-profile/bench/lob_latency]
+109,446,002 (89.12%) 324,077 (99.98%) 4 (100.0%) 1,196,038 (99.00%)  bench/latency_bench.cpp:(anonymous namespace)::apply(lob::OrderBook&, lob::Op const&) [/mnt/d/Projects/matching-engine/build-profile/bench/lo
+ 74,166,088 (60.39%) 130,818 (40.36%) 4 (100.0%)   762,137 (63.08%)  /mnt/d/Projects/matching-engine/src/order_book.cpp:lob::OrderBook::submit_limit(unsigned long, lob::Side, long, unsigned int)
+ 32,610,843 (26.55%)   8,642 ( 2.67%) 4 (100.0%)   359,544 (29.76%)  src/order_book.cpp:lob::OrderBook::rest(unsigned long, lob::Side, long, unsigned int, unsigned int) [/mnt/d/Projects/matching-engine/build-pr
+ 29,452,252 (23.98%)   2,031 ( 0.63%) 0             63,806 ( 5.28%)  ???:0x000000000010a490 [???]
+ 28,842,926 (23.49%)   2,029 ( 0.63%) 0             63,806 ( 5.28%)  ???:operator delete(void*, unsigned long) [/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33]
+ 28,233,600 (22.99%)   2,029 ( 0.63%) 0             63,806 ( 5.28%)  ???:0x00000000048ed430 [???]
+ 27,624,274 (22.49%)   2,026 ( 0.63%) 0             63,806 ( 5.28%)  ???:operator delete(void*) [/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33]
+ 27,014,948 (22.00%)   2,026 ( 0.63%) 0             63,806 ( 5.28%)  ???:0x00000000048edc60 [???]
+ 26,405,622 (21.50%)   2,022 ( 0.62%) 0             63,806 ( 5.28%)  ./malloc/./malloc/malloc.c:free [/usr/lib/x86_64-linux-gnu/libc.so.6]
+ 26,213,684 (21.35%)  11,318 ( 3.49%) 0            221,139 (18.30%)  src/order_book.cpp:unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::PriceLevel, std::less<long>, std::allocator<std:
+ 25,879,569 (21.07%)  10,120 ( 3.12%) 0            204,878 (16.96%)  src/order_book.cpp:unsigned int lob::OrderBook::match_against<std::map<long, lob::OrderBook::PriceLevel, std::greater<long>, std::allocator<s
+ 21,923,637 (17.85%)   3,780 ( 1.17%) 0             21,074 ( 1.74%)  ???:0x000000000010a480 [???]
+ 21,301,759 (17.35%)   3,779 ( 1.17%) 0             21,074 ( 1.74%)  ???:operator new(unsigned long) [/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33]
+ 17,795,024 (14.49%)   6,992 ( 2.16%) 0             88,114 ( 7.29%)  /usr/include/c++/13/bits/hashtable.h:std::_Hashtable<unsigned long, std::pair<unsigned long const, std::unique_ptr<lob::Order, std::default_d
+ 17,363,475 (14.14%)  33,243 (10.26%) 0            160,088 (13.25%)  /mnt/d/Projects/matching-engine/src/order_book.cpp:lob::OrderBook::submit_market(unsigned long, lob::Side, unsigned int)
+ 16,989,395 (13.83%)  12,609 ( 3.89%) 0            143,530 (11.88%)  src/order_book.cpp:lob::OrderBook::submit_market(unsigned long, lob::Side, unsigned int) [/mnt/d/Projects/matching-engine/build-profile/bench
+ 16,961,069 (13.81%)     287 ( 0.09%) 0             36,346 ( 3.01%)  ./malloc/./malloc/malloc.c:_int_free [/usr/lib/x86_64-linux-gnu/libc.so.6]
