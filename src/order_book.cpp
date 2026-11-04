@@ -4,33 +4,34 @@
 
 namespace lob {
 
-template <class Map>
-uint32_t OrderBook::match_against(Map& book, uint64_t takerId, bool takerIsBuy,
+template <class Levels>
+uint32_t OrderBook::match_against(Levels& book, uint64_t takerId, bool takerIsBuy,
                                   std::optional<int64_t> limit, uint32_t qty,
                                   std::vector<Trade>& out) {
-  while (qty > 0 && !book.empty()) {
-    const auto it = book.begin();  // best price on this side
+  int64_t price = 0;
+  while (qty > 0) {
+    PriceLevel* level = book.best(price);  // best price on this side, window or fallback
+    if (level == nullptr) break;
     if (limit.has_value()) {
-      const bool crosses = takerIsBuy ? (it->first <= *limit) : (it->first >= *limit);
+      const bool crosses = takerIsBuy ? (price <= *limit) : (price >= *limit);
       if (!crosses) break;
     }
 
-    PriceLevel& level = it->second;
-    while (qty > 0 && level.head != nullptr) {
-      Order* maker = level.head;
+    while (qty > 0 && level->head != nullptr) {
+      Order* maker = level->head;
       const uint32_t fill = std::min(qty, maker->remaining);
       out.push_back(Trade{maker->id, takerId, maker->price, fill});
       qty -= fill;
       maker->remaining -= fill;
-      level.totalQty -= fill;
+      level->totalQty -= fill;
       if (maker->remaining == 0) {
         const uint64_t makerId = maker->id;  // copy: the slot is recycled right after
-        level.unlink(maker);
+        level->unlink(maker);
         index_.erase(makerId);
         pool_.release(maker);
       }
     }
-    if (level.head == nullptr) book.erase(it);  // never leave an empty level behind
+    if (level->head == nullptr) book.release(price);  // never leave an empty level behind
   }
   return qty;
 }
@@ -38,9 +39,9 @@ uint32_t OrderBook::match_against(Map& book, uint64_t takerId, bool takerIsBuy,
 void OrderBook::rest(uint64_t id, Side side, int64_t price, uint32_t qty, uint32_t remaining) {
   Order* o = pool_.allocate(Order{id, 0, side, price, qty, remaining, ++seq_});
   if (side == Side::Buy) {
-    bids_[price].push_back(o);
+    bids_.acquire(price).push_back(o);
   } else {
-    asks_[price].push_back(o);
+    asks_.acquire(price).push_back(o);
   }
   index_.insert(id, o);
 }
@@ -73,13 +74,13 @@ bool OrderBook::cancel(uint64_t id) {
   if (o == nullptr) return false;
 
   if (o->side == Side::Buy) {
-    const auto it = bids_.find(o->price);
-    it->second.unlink(o);
-    if (it->second.head == nullptr) bids_.erase(it);
+    PriceLevel* level = bids_.find(o->price);
+    level->unlink(o);
+    if (level->head == nullptr) bids_.release(o->price);
   } else {
-    const auto it = asks_.find(o->price);
-    it->second.unlink(o);
-    if (it->second.head == nullptr) asks_.erase(it);
+    PriceLevel* level = asks_.find(o->price);
+    level->unlink(o);
+    if (level->head == nullptr) asks_.release(o->price);
   }
   index_.erase(id);
   pool_.release(o);
@@ -97,44 +98,30 @@ void OrderBook::modify(uint64_t id, int64_t new_price, uint32_t new_qty,
   submit_limit(id, side, new_price, new_qty, out);  // qty 0 is rejected: order stays cancelled
 }
 
-std::optional<int64_t> OrderBook::best_bid() const {
-  if (bids_.empty()) return std::nullopt;
-  return bids_.begin()->first;
-}
+std::optional<int64_t> OrderBook::best_bid() const { return bids_.best_price(); }
 
-std::optional<int64_t> OrderBook::best_ask() const {
-  if (asks_.empty()) return std::nullopt;
-  return asks_.begin()->first;
-}
+std::optional<int64_t> OrderBook::best_ask() const { return asks_.best_price(); }
 
 uint32_t OrderBook::total_qty_at(Side side, int64_t price) const {
-  if (side == Side::Buy) {
-    const auto it = bids_.find(price);
-    return it == bids_.end() ? 0u : static_cast<uint32_t>(it->second.totalQty);
-  }
-  const auto it = asks_.find(price);
-  return it == asks_.end() ? 0u : static_cast<uint32_t>(it->second.totalQty);
+  const PriceLevel* level = side == Side::Buy ? bids_.find(price) : asks_.find(price);
+  return level == nullptr ? 0u : static_cast<uint32_t>(level->totalQty);
 }
 
 std::vector<std::pair<int64_t, uint32_t>> OrderBook::depth(Side side) const {
+  const auto snapshot = side == Side::Buy ? bids_.snapshot() : asks_.snapshot();
   std::vector<std::pair<int64_t, uint32_t>> levels;
-  if (side == Side::Buy) {
-    levels.reserve(bids_.size());
-    for (const auto& [price, level] : bids_) {
-      levels.emplace_back(price, static_cast<uint32_t>(level.totalQty));
-    }
-  } else {
-    levels.reserve(asks_.size());
-    for (const auto& [price, level] : asks_) {
-      levels.emplace_back(price, static_cast<uint32_t>(level.totalQty));
-    }
+  levels.reserve(snapshot.size());
+  for (const auto& [price, level] : snapshot) {
+    levels.emplace_back(price, static_cast<uint32_t>(level->totalQty));
   }
   return levels;
 }
 
-template <class Map>
-bool OrderBook::check_side(const Map& book, Side side, std::size_t& counted) const {
-  for (const auto& [price, level] : book) {
+template <class Levels>
+bool OrderBook::check_side(const Levels& book, Side side, std::size_t& counted) const {
+  if (!book.check_structure()) return false;  // bitmap, best cursor and fallback map
+  for (const auto& [price, level_ptr] : book.snapshot()) {
+    const PriceLevel& level = *level_ptr;
     // No empty levels, and the list ends must be consistent.
     if (level.head == nullptr || level.tail == nullptr) return false;
     if (level.head->prev != nullptr || level.tail->next != nullptr) return false;
@@ -174,9 +161,9 @@ bool OrderBook::check_invariants() const {
   if (!ids_match) return false;
 
   // The book is never crossed.
-  if (!bids_.empty() && !asks_.empty() && bids_.begin()->first >= asks_.begin()->first) {
-    return false;
-  }
+  const auto bid = bids_.best_price();
+  const auto ask = asks_.best_price();
+  if (bid && ask && *bid >= *ask) return false;
   return true;
 }
 

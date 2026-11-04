@@ -66,6 +66,10 @@ struct Options {
   uint64_t seed = 1;
   std::optional<int> pin_core;
   std::optional<uint64_t> resting;  // expected peak resting orders, sizes the id index
+  int64_t price_min = 90;           // generator price band
+  int64_t price_max = 110;
+  int64_t base = 0;                 // price window: first in-window tick
+  uint64_t window = lob::OrderBook::kDefaultWindowTicks;  // price window: number of ticks
   std::string dump_path;
 };
 
@@ -78,12 +82,26 @@ void print_usage(const char* argv0) {
                "  --pin-core C   pin the thread to core C (default: no pinning)\n"
                "  --resting N    expected peak resting orders, sizes the id index so it does not\n"
                "                 grow while timing (default: (warmup + ops) / 50, at least 1024)\n"
+               "  --price-min P  lowest generated price (default 90)\n"
+               "  --price-max P  highest generated price (default 110)\n"
+               "  --base B       first tick of the flat price-level window (default 0)\n"
+               "  --window W     number of ticks in the window (default 4096). The generator uses\n"
+               "                 prices 90..110, so '--base 90 --window 21' is a window that just\n"
+               "                 fits; prices outside the window take a slow path\n"
                "  --dump PATH    write raw per-op latencies in ns, one per line\n",
                argv0);
 }
 
 std::optional<uint64_t> parse_u64(std::string_view s) {
   uint64_t v = 0;
+  const char* end = s.data() + s.size();
+  const auto [ptr, ec] = std::from_chars(s.data(), end, v);
+  if (s.empty() || ec != std::errc{} || ptr != end) return std::nullopt;
+  return v;
+}
+
+std::optional<int64_t> parse_i64(std::string_view s) {
+  int64_t v = 0;
   const char* end = s.data() + s.size();
   const auto [ptr, ec] = std::from_chars(s.data(), end, v);
   if (s.empty() || ec != std::errc{} || ptr != end) return std::nullopt;
@@ -107,6 +125,15 @@ bool parse_args(int argc, char** argv, Options& opt) {
       opt.dump_path = std::string(value);
       continue;
     }
+    if (arg == "--base" || arg == "--price-min" || arg == "--price-max") {
+      const auto b = parse_i64(value);
+      if (!b) {
+        std::fprintf(stderr, "error: bad value '%s' for %s\n", argv[i], argv[i - 1]);
+        return false;
+      }
+      (arg == "--base" ? opt.base : arg == "--price-min" ? opt.price_min : opt.price_max) = *b;
+      continue;
+    }
     const auto n = parse_u64(value);
     if (!n) {
       std::fprintf(stderr, "error: bad value '%s' for %s\n", argv[i], argv[i - 1]);
@@ -122,10 +149,16 @@ bool parse_args(int argc, char** argv, Options& opt) {
       opt.pin_core = static_cast<int>(*n);
     } else if (arg == "--resting") {
       opt.resting = *n;
+    } else if (arg == "--window") {
+      opt.window = *n;
     } else {
       std::fprintf(stderr, "error: unknown option '%s'\n", argv[i - 1]);
       return false;
     }
+  }
+  if (opt.price_min > opt.price_max) {
+    std::fprintf(stderr, "error: --price-min must not exceed --price-max\n");
+    return false;
   }
   if (opt.ops == 0) {
     std::fprintf(stderr, "error: --ops must be greater than 0\n");
@@ -246,6 +279,8 @@ int main(int argc, char** argv) {
   // 1. Generate everything before any timing.
   lob::GenConfig cfg;
   cfg.seed = opt.seed;
+  cfg.price_min = opt.price_min;
+  cfg.price_max = opt.price_max;
   lob::OrderGenerator gen(cfg);
   std::vector<Op> ops;
   ops.reserve(opt.warmup + opt.ops);
@@ -265,7 +300,8 @@ int main(int argc, char** argv) {
   // inside the measured loop; the resize counter below confirms it.
   const uint64_t expected_resting =
       opt.resting ? *opt.resting : std::max<uint64_t>(1024, (opt.warmup + opt.ops) / 50);
-  OrderBook book(static_cast<std::size_t>(expected_resting));
+  OrderBook book(static_cast<std::size_t>(expected_resting), opt.base,
+                 static_cast<std::size_t>(opt.window));
   uint64_t sink = 0;
   Result result;
   result.trades.reserve(64);  // the generator's quantities cap one op at 20 trades
@@ -276,6 +312,7 @@ int main(int argc, char** argv) {
 
   // 3. Measured loop. latencies is preallocated; nothing in the loop allocates in the harness.
   const std::size_t resizes_before = book.id_index_resizes();
+  const std::size_t out_of_window_before = book.out_of_window_orders();
   std::vector<uint64_t> latencies(opt.ops);
   uint64_t checksum = 0;
   uint64_t trade_count = 0;
@@ -294,6 +331,7 @@ int main(int argc, char** argv) {
   }
   const auto loop_end = Clock::now();
   const std::size_t resizes_measured = book.id_index_resizes() - resizes_before;
+  const std::size_t out_of_window_measured = book.out_of_window_orders() - out_of_window_before;
   const int cpu_after = sched_getcpu();
   const double wall_s = std::chrono::duration<double>(loop_end - loop_start).count();
 
@@ -331,6 +369,8 @@ int main(int argc, char** argv) {
   std::printf("  wsl:       %s\n",
               running_under_wsl() ? "yes (timings are noisy; prefer native Linux)" : "no");
   std::printf("config:\n");
+  std::printf("  generated prices %lld..%lld\n", static_cast<long long>(opt.price_min),
+              static_cast<long long>(opt.price_max));
   std::printf("  seed %llu, warmup %llu ops (discarded), measured %llu ops\n",
               static_cast<unsigned long long>(opt.seed),
               static_cast<unsigned long long>(opt.warmup),
@@ -349,15 +389,18 @@ int main(int argc, char** argv) {
   std::printf("  id index        %zu slots for %llu expected resting orders, resizes: %zu total, %zu in measured loop\n",
               book.id_index_capacity(), static_cast<unsigned long long>(expected_resting),
               book.id_index_resizes(), resizes_measured);
+  std::printf("  price window    base %lld, %llu ticks; orders resting out of window: %zu total, %zu in measured loop\n",
+              static_cast<long long>(opt.base), static_cast<unsigned long long>(opt.window),
+              book.out_of_window_orders(), out_of_window_measured);
   std::printf("  checksum        %016llx\n", static_cast<unsigned long long>(checksum));
   std::printf(
       "RESULT p50=%llu p90=%llu p99=%llu p999=%llu max=%llu ops_per_sec=%.0f timer_ns=%.0f "
-      "trades=%llu resting=%llu index_resizes_measured=%zu checksum=%016llx\n",
+      "trades=%llu resting=%llu index_resizes_measured=%zu oow_measured=%zu checksum=%016llx\n",
       static_cast<unsigned long long>(p50), static_cast<unsigned long long>(p90),
       static_cast<unsigned long long>(p99), static_cast<unsigned long long>(p999),
       static_cast<unsigned long long>(pmax), ops_per_sec, timer_overhead_ns,
       static_cast<unsigned long long>(trade_count), static_cast<unsigned long long>(resting),
-      resizes_measured, static_cast<unsigned long long>(checksum));
+      resizes_measured, out_of_window_measured, static_cast<unsigned long long>(checksum));
 
   // Keep the warm-up results observable so none of that work can be elided.
   if (sink == 0x1234567890abcdefULL) std::puts("(sink)");

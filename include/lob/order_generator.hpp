@@ -35,6 +35,13 @@ struct GenConfig {
   // ids ever issued. Recent ids are far more likely to still be resting.
   uint32_t recent_bias_pct = 80;
   uint32_t recent_window = 50;
+  // Optional far-away prices, for tests that need orders outside any sensible price window:
+  // far_price_pct percent of limit and modify prices are drawn uniformly from
+  // [far_price_min, far_price_max] instead of the normal band. At 0 (the default) no extra random
+  // numbers are drawn, so the stream is identical to a config without these fields.
+  uint32_t far_price_pct = 0;
+  int64_t far_price_min = 1'000'000;
+  int64_t far_price_max = 1'001'000;
 };
 
 // Deterministic random operation stream. Only the raw output of std::mt19937_64 (whose
@@ -76,6 +83,12 @@ class OrderGenerator {
   Side random_side() { return below(2) == 0 ? Side::Buy : Side::Sell; }
 
   int64_t random_price() {
+    if (cfg_.far_price_pct != 0 && below(100) < cfg_.far_price_pct) {
+      // Unsigned arithmetic so the span is right even for a range straddling zero by 2^63.
+      const uint64_t far_span =
+          static_cast<uint64_t>(cfg_.far_price_max) - static_cast<uint64_t>(cfg_.far_price_min) + 1;
+      return static_cast<int64_t>(static_cast<uint64_t>(cfg_.far_price_min) + below(far_span));
+    }
     const uint64_t span = static_cast<uint64_t>(cfg_.price_max - cfg_.price_min) + 1;
     return cfg_.price_min + static_cast<int64_t>(below(span));
   }

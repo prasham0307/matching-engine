@@ -31,6 +31,10 @@ harness, seed and operation count so rows are comparable.
   engine's buffer API is meant to be used. From the flat id index row onward the harness also
   sizes the id index for the expected number of resting orders (`--resting`, default one per 50
   ops) and prints how many times the index resized inside the measured loop (0 in every run).
+  From the flat price-level row onward it also takes `--base`, `--window` (the price-level window,
+  default base 0 and 4096 ticks, deliberately not fitted to the generator), `--price-min` and
+  `--price-max` (the generated price band, default 90..110), and prints how many orders rested
+  outside the window (0 in every default run).
 - Percentiles, not averages (nearest-rank). Raw values: the median cost of the timer itself
   (two back-to-back `now()` calls, about 26 ns here) is reported but **not subtracted**.
 - Throughput is measured operations divided by the wall time of the whole measured loop, so it
@@ -40,6 +44,11 @@ harness, seed and operation count so rows are comparable.
   implementation. If it changes, behaviour changed and the row is not comparable.
 - Each baseline is run 3 times; the table records the median run (by p50).
 - Pinned to one core, machine otherwise idle (checked before measuring).
+- **Comparisons use interleaved A/B.** This machine switches between a slow and a fast state
+  (see Optimization 2 and 3), so two back-to-back sets of 5 runs can differ by 2x for reasons
+  unrelated to the code. From the flat price-level row onward the headline numbers come from runs
+  of the old and new binaries alternating, with the order alternated too. Sequential sets are still
+  reported but flagged.
 - **WSL2 caveat:** timings are noisy (hypervisor scheduling, timer virtualization). Max latency
   shows multi-millisecond outliers that say nothing about the code. Treat differences of a few
   percent as noise, and take final numbers from native Linux if possible.
@@ -57,6 +66,7 @@ Reproduce:
 | 2026-11-04 | baseline: std::map + unique_ptr orders | e5f469b | 142 ns | 890 ns | 1,719 ns | 3.89M | Median of 3 runs. 2,811,186 trades, 81,137 resting orders at end, checksum 002f8ec71a31eeb9, timer overhead 26 ns |
 | 2026-11-04 | pool Orders + reuse trade buffer | 0b81941 | 135 ns | 583 ns | 1,081 ns | 4.54M | Median of 5 runs per metric, not one run. Same-session before: p50 158, p99 970, p99.9 1,733, 3.59M ops/s. Before and after ranges do not overlap. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 1" below |
 | 2026-11-04 | flat open-addressed id index | 131ab28 | 92 ns | 413 ns | 722 ns | 5.97M | Median of 5 runs per metric, same-session before: p50 121, p99 532, p99.9 990, 4.92M ops/s. Interleaved A/B against the previous code (6 pairs, every pair faster): 4.67M to 6.10M ops/s, +30.6%. Index resizes in measured loop: 0. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 2" below |
+| 2026-11-04 | flat price-level array (window 4096) | (this commit) | 47 ns | 195 ns | 384 ns | 11.81M | Median of 12 alternating-order A/B pairs against the previous code (10.22M ops/s, p50 56): +15.5%, all 12 pairs faster, paired ratio 1.05 to 1.34. Other interleaved sets gave +8% and +20%. Zero allocator calls per op. A 21-tick window is the same speed; on a 1..2000 price band a window that misses the traffic is about 26% slower. Earlier rows are from separate sessions and machine states, see the re-measure table in Optimization 3. Checksum unchanged (002f8ec71a31eeb9) |
 
 ## Baseline runs (run-to-run variation)
 
@@ -447,3 +457,167 @@ about 31% of estimated time) and contains the inlined map operations, so it shou
 after the levels. Candidate direction: a flat array of price levels indexed by tick offset, with
 a best-price cursor, checking first that the price band assumption does not just overfit the
 generator.
+
+## Optimization 3: flat price-level array
+
+Change: the `std::map` price levels are replaced by `PriceLevels` (`include/lob/price_levels.hpp`),
+one per side. Prices in a window of W ticks starting at `base` index a contiguous array of
+`PriceLevel {head, tail, totalQty}` (24 bytes, defined in `include/lob/price_level.hpp`). The
+in-window test is a single unsigned compare, `uint64(price) - uint64(base) < W`, which is also right
+at the ends of the int64 range. A bitmap with one bit per level and a cursor holding the best
+non-empty index make "best price" an array read; when the best level empties, the next best is found
+with `countl_zero` / `countr_zero` over bitmap words (at most W/64 word reads, typically one).
+`base` and `W` are `OrderBook` constructor arguments (defaults 0 and 4096). The pool, `IdIndex` and
+`NaiveMatcher` are untouched.
+
+Prices outside the window still work, through a `std::map` per side used only for them. **That is a
+slow path: it allocates a node per level and costs O(log n).** `best()` merges the two by comparing
+the window's best price with the map's best price, so matching walks the levels of both in correct
+price order; `depth()` merges the two sorted sequences. `OrderBook::out_of_window_orders()` counts
+orders that rested out of window; while it is 0 the map has never been populated and none of the
+fallback code has run. It was 0 in every measured region of every default run below.
+
+Best-price scan versus bitmap: I chose the bitmap because scanning the level array for the next
+non-empty level is O(W) every time the best level empties, which gets worse exactly as the window gets
+sparser, the failure the wide-window runs are meant to expose. Rejected: a rebasing window (moves
+every level, and still needs a fallback), a ring keyed by `price mod W` (aliases distant prices), a
+sorted vector of levels (O(n) inserts), a hash map from price to level (flat, but no best-price
+order), a two-level bitmap (only worth it for windows in the millions of ticks).
+
+### Correctness evidence
+
+- 103 tests pass in Debug with ASan/UBSan and in Release (73 before): 13 `PriceLevels` unit tests
+  (including a randomized comparison with a `std::map` reference over windows of 0, 1, 63, 64, 65, 130
+  and 300 ticks, windows not a multiple of 64, extreme and negative prices), 13 `OrderBook` window tests
+  that run each scenario against `NaiveMatcher` in lockstep (sweeps crossing both window edges, best
+  cursor after the best level empties, cancel of the last order in a level, orders exactly at
+  `base - 1`, `base`, `base + W - 1` and `base + W`, out-of-window orders matching in-window ones,
+  modify across the edge), and 4 new fuzz scenarios.
+- Fuzz scenarios, each against `NaiveMatcher` with 6 seeds, comparing trades, cancel results, best
+  prices, `total_qty_at` on probe prices and `depth()` ordering, with `check_invariants()` every 1000 ops:
+
+  | Scenario | Setup | Out-of-window rests per op (guard) | Ops per seed, Debug / Release |
+  |---|---|---|---|
+  | in-window | band 90..110, window 0..4095 | 0 (must be exactly 0) | 40,000 / 250,000 |
+  | window-edge | band 90..110, window 95..104 | 0.175 (> 0.08) | 10,000 / 62,500 |
+  | all-fallback | same band, window width 0 | 0.383 (> 0.19) | 10,000 / 62,500 |
+  | wide-range | band 1..5000, window 2000..2999 | 0.294 (> 0.15) | 20,000 / 125,000 |
+  | far-outside | band 90..110 plus 5% of prices uniform in +-2^62 | 0.0141 (> 0.007) | 10,000 / 62,500 |
+
+  The cancel and modify hit-rate guards (above 8%) pass in every scenario (16.9% to 18.2%). The
+  window-edge and all-fallback scenarios run the same generated stream with different windows, and
+  their trade counts are identical, as they must be.
+  The generator gained an optional far-price mode (`far_price_pct`, off by default and drawing no
+  random numbers when off, so every earlier stream and the baseline checksum are unchanged).
+- Mutation check: three bugs injected into `price_levels.hpp` one at a time were all caught
+  (window bound `<=` instead of `<`: ASan heap-buffer-overflow in `acquire`; best-price merge that
+  ignores the fallback: 3 fuzz scenarios plus the boundary test fail; cursor not advanced when the best
+  level empties: fuzz mismatches, then a hang). The hang prompted a 600 s per-test timeout in CMake.
+- The checksum is `002f8ec71a31eeb9` in every default 5M-op run, and the bench produces the same
+  checksum for any `--base` / `--window` on the same generated stream.
+
+### Latency and throughput
+
+Headline, 12 alternating-order A/B pairs on the default 5M-op workload, pinned core 2 (old = previous
+commit built with the Release flags, new = this commit with the default 4096-tick window):
+
+| Metric | Old: median (min to max) | New: median (min to max) | Change of median |
+|---|---|---|---|
+| p50 | 56 ns (55 to 59) | 47 ns (46 to 49) | -16.1% |
+| p90 | 127 ns (120 to 159) | 90 ns (84 to 118) | -29.5% |
+| p99 | 244 ns (217 to 290) | 195 ns (174 to 289) | -19.9% |
+| p99.9 | 437 ns (397 to 488) | 384 ns (318 to 518) | -12.2% |
+| Orders/sec | 10.22M (9.09M to 10.52M) | 11.81M (10.58M to 12.80M) | +15.5% |
+
+The new code was faster in all 12 pairs; the paired throughput ratio has median 1.16 and range 1.05 to
+1.34. That range is the honest uncertainty: the gain is real, and its size is somewhere around 5% to
+30%, best estimate about 15%. Two other interleaved sets gave +20.0% (6 rounds, 3 variants) and +8.2%
+(5 rounds, 4 variants, one pair at 0.78 when the machine dropped into its slow state), so a quote of
+"about 15%" is not conservative or inflated, but anything finer would be.
+
+Window size, 6 interleaved rounds with the old code for reference: old 8.86M ops/s, new with a 4096-tick
+window 10.62M (+20.0%), new with a window that just fits (`--base 90 --window 21`) 10.40M (+17.4%). Per
+round the tight window was 0.87 to 1.04 times the wide one, median 1.00. On this workload a sparse
+window costs nothing measurable. The simulated profile is identical for the two windows (216
+instructions and 1.63 L1 misses per op), because the 21 occupied levels sit in the same bitmap word
+and the same 504 bytes of the array either way.
+
+The sequential 5-run sets taken at the start of the task (before, p50 92 ns and 6.07M ops/s; after,
+p50 52 ns and 9.60M ops/s, range 6.40M to 10.31M) look like a +58% gain. **That figure is not
+trustworthy**: the machine was in its slow state for the "before" set and mostly in its fast state for
+the "after" set, and the first "after" run (6.40M) shows the transition. It is not used anywhere above.
+
+Re-measure of the whole history on one scale (5 interleaved rounds, four builds, medians), because the
+earlier Log rows come from separate sessions in different machine states and cannot be compared with
+this row:
+
+| Version | p50 | p99 | p99.9 | Orders/sec | Step |
+|---|---|---|---|---|---|
+| Baseline (`std::map`, `unordered_map`, heap Orders) | 91 ns | 561 ns | 1,041 ns | 6.07M | |
+| Pooled Orders, reused trade buffer | 82 ns | 385 ns | 684 ns | 7.20M | +18.6% |
+| Flat id index | 57 ns | 257 ns | 454 ns | 9.71M | +34.8% |
+| Flat price levels | 48 ns | 220 ns | 414 ns | 10.51M | +8.2% |
+
+Overall about 1.7x on the baseline workload. The last step reads +8% here and +15.5% in the 12-pair run.
+
+### Engine-only profile (Callgrind, same method as before)
+
+| | Before (flat id index, `std::map` levels) | After (flat levels) |
+|---|---|---|
+| Instructions per op | 281 (200k ops), 284 (5M ops) | 213 (200k), 216 (5M) |
+| Allocator calls per op | 0.52 (200k), 0.49 (5M) | 0.00, 0.00 |
+| Allocator instructions per op | 39 | 0 |
+| Simulated L1 data misses per op | 1.58 (200k), 1.65 (5M) | 1.56 (200k), 1.63 (5M) |
+| Simulated mispredicts per op | 4.27 (200k), 4.49 (5M) | 2.73, 2.96 |
+| Window of 21 ticks, 5M | | 216, 0.00, 1.63, 2.96 (identical) |
+
+The engine now performs no heap allocation at all in the measured region. Price-level cost per op
+(5M): `std::map` 51.9 own instructions plus 38.8 for its node allocations (90.7) became 20.5 for the
+array and bitmap plus 1.4 for `empty()` checks on the unused fallback map (21.9). The matching loop and
+book logic stayed at 96 (95 after), the id index at 31, the trade-vector logic at 19 to 25 (some
+classification drift between categories of a few instructions). By the baseline cost model (an
+estimate, not hardware validated) the engine drops from about 181 to about 124 cycles per op.
+
+L1 misses did not move: they come from the id index (0.91 per op) and, outside the engine, from the
+harness reading its op array (0.63 per op). Raw profiles are in `docs/profiles/after_levels_*`.
+
+### Overfitting risk and what the wide-window runs show
+
+The generator draws prices from 90 to 110, 21 adjacent ticks, so almost everything that makes a flat
+array look good is built into the workload: the occupied levels share a few cache lines, the best
+cursor never moves more than a few ticks, and the bitmap scan never leaves one 64-bit word. The
+4096-tick window being as fast as the 21-tick window therefore says only that an empty tick costs
+nothing, not that a sparse book is cheap. To test the parts the default workload cannot, `lob_latency`
+now takes `--price-min` and `--price-max`; here are three interleaved rounds on a band of 1..2000
+(levels spread over 2000 ticks; a window that misses it sees about 39 out-of-window rests per 100 ops):
+
+| Window | Orders/sec (median of 3) | p50 | p99 | Out-of-window rests in the measured loop |
+|---|---|---|---|---|
+| 4096 ticks at base 0 (covers the band) | 10.58M | 47 ns | 240 ns | 0 |
+| 21 ticks at base 90 (covers about 1% of it) | 7.73M | 71 ns | 356 ns | 1,931,854 |
+| width 0 (everything through the fallback) | 7.87M | 71 ns | 332 ns | 1,946,698 |
+
+- With a window that covers a spread-out band, speed holds (10.6M, against 11.8M on the narrow band),
+  so scanning a sparse bitmap is cheap at W=4096, where a scan is at most 64 words.
+- When the window misses the traffic the engine falls back to the old structure's behavior: about 26%
+  slower and a 38% to 48% worse p99, plus a heap allocation per new level. All three produce the same checksum
+  (`9e169e3f9cf3a289` for this band), so the fallback is correct, only slow.
+- So the benefit depends on the window being chosen to cover where prices trade. A fixed window is a
+  real limitation: prices drift, and nothing here recenters the window. A production version would need
+  to recenter or at least alarm on `out_of_window_orders()`. I did not measure windows far larger than
+  4096 (for example a million ticks, where a bitmap scan can reach thousands of words and a two-level
+  bitmap would be needed), nor a book whose best level empties with the next one thousands of ticks
+  away, which is the worst case for the scan.
+
+### Next target
+
+With allocation gone, the profile is flat: no single structure is left to remove. Engine instructions
+per op (5M, 188 of 216 excluding the harness): matching loop and book logic 95 (51%), id index 31
+(16%), trade-vector logic 25 (13%), price levels 21 (11%), other 16 (8%). The model puts the matching
+loop at about 43% of estimated time and the id index at about 29%, the latter because of its 0.9 L1
+misses per op, although the identity-hash experiment showed those misses barely move wall-clock time.
+The most concrete lead is redundant probing: `submit_limit` probes the id index once to reject a
+duplicate and again to insert, `cancel` finds and then erases, and each fill erases by id again. Fusing
+those into single-probe operations would trim both the id-index instructions and the book logic. After
+that, line-level profiling of `match_against` and `rest` (which are 87 and 42 instructions per op) is
+the way to find what the remaining 95 matching-loop instructions are spent on.

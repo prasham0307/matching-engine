@@ -89,7 +89,7 @@ def category(fn, fl):
     if fn in ALLOC_FN or fn.startswith('0x') or 'malloc/' in f:
         return 'heap allocator (malloc/free/operator new/delete)'
     if fn.startswith('std::_Rb_tree_') or f.endswith(('stl_tree.h', 'stl_map.h')):
-        return 'std::map (price levels)'
+        return 'std::map (price levels / fallback)'
     if '_Hashtable' in fn or '_Prime_rehash' in fn or \
             f.endswith(('hashtable.h', 'hashtable_policy.h', 'unordered_map.h', 'functional_hash.h',
                         'id_index.hpp')):
@@ -98,7 +98,11 @@ def category(fn, fl):
         return 'vector<Trade> logic'
     if f.endswith(('new_allocator.h', 'alloc_traits.h', 'unique_ptr.h')):
         return 'allocator/unique_ptr glue'
-    if f.endswith(('order_book.cpp', 'order_book.hpp')):
+    if f.endswith('price_levels.hpp'):
+        return 'price levels (flat array + bitmap)'
+    # price_level.hpp holds the intrusive FIFO that used to be a nested struct of OrderBook, so
+    # it stays with the matching loop to keep the comparison with older profiles like for like.
+    if f.endswith(('order_book.cpp', 'order_book.hpp', 'price_level.hpp')):
         return 'matching loop + book logic'
     if f.endswith('latency_bench.cpp'):
         return 'harness (apply wrapper, loop, checksum)'
@@ -206,7 +210,8 @@ def main(path, ops):
         ('id index (own code + node allocs)', cats['id index (hash table)'][0] + life * (1 - order_share)),
         ('vector<Trade> (own code + buffer allocs)', cats['vector<Trade> logic'][0] + own['vector<Trade>']),
         ('matching loop + book logic', cats['matching loop + book logic'][0]),
-        ('std::map (own code + node allocs)', cats['std::map (price levels)'][0] + own['std::map level nodes']),
+        ('std::map (own code + node allocs)', cats['std::map (price levels / fallback)'][0] + own['std::map level nodes']),
+        ('price levels, flat array + bitmap', cats['price levels (flat array + bitmap)'][0]),
         ('Order objects (allocs only)', life * order_share),
         ('glue/other (allocator wrappers, unique_ptr, memcpy, min)',
          cats['allocator/unique_ptr glue'][0] + cats['other (std::min/copy, memcpy, misc)'][0] + own['unattributed']),
@@ -221,15 +226,17 @@ def main(path, ops):
 
     # Estimated time shares: cost model on engine categories only (the harness's op-array
     # streaming misses are excluded: hardware prefetch hides them, the simulator does not).
+    # Categories can be absent (a profile with no allocator work, say), hence .get below.
     eng_cyc = {c: cycles(v) for c, v in cats.items() if not c.startswith('harness')}
-    alloc_c = eng_cyc['heap allocator (malloc/free/operator new/delete)']
-    glue_c = eng_cyc['allocator/unique_ptr glue'] + eng_cyc['other (std::min/copy, memcpy, misc)']
+    alloc_c = eng_cyc.get('heap allocator (malloc/free/operator new/delete)', 0.0)
+    glue_c = eng_cyc.get('allocator/unique_ptr glue', 0.0) + eng_cyc.get('other (std::min/copy, memcpy, misc)', 0.0)
     est = {
         'heap allocation, all owners': alloc_c,
-        'matching loop + book logic': eng_cyc['matching loop + book logic'],
-        'id index ops (excl. allocation)': eng_cyc['id index (hash table)'],
-        'std::map ops (excl. allocation)': eng_cyc['std::map (price levels)'],
-        'vector<Trade> logic (excl. allocation)': eng_cyc['vector<Trade> logic'],
+        'matching loop + book logic': eng_cyc.get('matching loop + book logic', 0.0),
+        'id index ops (excl. allocation)': eng_cyc.get('id index (hash table)', 0.0),
+        'std::map ops (excl. allocation)': eng_cyc.get('std::map (price levels / fallback)', 0.0),
+        'price levels, flat array + bitmap': eng_cyc.get('price levels (flat array + bitmap)', 0.0),
+        'vector<Trade> logic (excl. allocation)': eng_cyc.get('vector<Trade> logic', 0.0),
         'glue/other': glue_c,
     }
     tot = sum(est.values())
@@ -249,6 +256,7 @@ def main(path, ops):
             'id index (ops + its node allocs)': est['id index ops (excl. allocation)'] + alloc_c * life_f * (1 - order_share),
             'vector<Trade> (logic + buffer allocs)': est['vector<Trade> logic (excl. allocation)'] + alloc_c * vec_f,
             'std::map (ops + level node allocs)': est['std::map ops (excl. allocation)'] + alloc_c * map_f,
+            'price levels, flat array + bitmap': est['price levels, flat array + bitmap'],
             'Order objects (allocs only)': alloc_c * life_f * (1 - order_share),
             'matching loop + book logic': est['matching loop + book logic'],
             'glue/other': est['glue/other'],

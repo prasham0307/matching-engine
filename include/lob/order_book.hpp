@@ -2,27 +2,37 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <map>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include "lob/id_index.hpp"
 #include "lob/order_pool.hpp"
+#include "lob/price_levels.hpp"
 #include "lob/types.hpp"
 
 namespace lob {
 
-// Single-symbol limit order book. Price levels are ordered maps; each level is an intrusive
-// doubly linked FIFO of resting orders, and the orders themselves come from an OrderPool. Same
-// public interface and rules as NaiveMatcher, which it is tested against.
+// Single-symbol limit order book. Each side keeps its price levels in a flat array over a window
+// of ticks (PriceLevels), each level is an intrusive doubly linked FIFO of resting orders, the
+// orders come from an OrderPool, and an IdIndex maps order ids to orders. Same public interface
+// and rules as NaiveMatcher, which it is tested against.
 class OrderBook {
  public:
+  static constexpr std::size_t kDefaultWindowTicks = 4096;
+
   // `expected_resting_orders` sizes the id index so it never has to grow while the book holds
   // that many orders or fewer. Growing is still correct, just a slow path that allocates.
-  explicit OrderBook(std::size_t expected_resting_orders = 1024)
-      : index_(expected_resting_orders) {}
+  //
+  // Prices in [base_price, base_price + window_ticks) use the flat level array: no allocation and
+  // O(1) level lookup. Any other price is still handled correctly, through a std::map per side
+  // that is a SLOW PATH (it allocates and costs O(log n)). Pick the window to cover the prices
+  // you expect; out_of_window_orders() tells you whether anything used the slow path.
+  explicit OrderBook(std::size_t expected_resting_orders = 1024, int64_t base_price = 0,
+                     std::size_t window_ticks = kDefaultWindowTicks)
+      : bids_(base_price, window_ticks),
+        asks_(base_price, window_ticks),
+        index_(expected_resting_orders) {}
 
   // Hot-path API. Trades are written to `out`, which is cleared first and keeps its capacity, so
   // a buffer reused across calls stops allocating once it has grown to the largest result.
@@ -66,62 +76,32 @@ class OrderBook {
   std::size_t id_index_capacity() const { return index_.capacity(); }
   std::size_t id_index_resizes() const { return index_.resize_count(); }
 
+  // Price window statistics. out_of_window_orders() is the number of orders that came to rest at
+  // a price outside the window (the slow path), cumulative; zero means the fallback never ran.
+  int64_t window_base() const { return bids_.base(); }
+  std::size_t window_ticks() const { return bids_.window(); }
+  std::size_t out_of_window_orders() const {
+    return bids_.out_of_window_rests() + asks_.out_of_window_rests();
+  }
+
   // Verifies the structural invariants of the book. For tests and debugging only.
   bool check_invariants() const;
 
  private:
-  struct PriceLevel {
-    Order* head = nullptr;
-    Order* tail = nullptr;
-    uint64_t totalQty = 0;
-
-    void push_back(Order* o) {
-      o->prev = tail;
-      o->next = nullptr;
-      if (tail != nullptr) {
-        tail->next = o;
-      } else {
-        head = o;
-      }
-      tail = o;
-      totalQty += o->remaining;
-    }
-
-    // Removes o from the list in O(1) and takes its remaining quantity off the total.
-    void unlink(Order* o) {
-      if (o->prev != nullptr) {
-        o->prev->next = o->next;
-      } else {
-        head = o->next;
-      }
-      if (o->next != nullptr) {
-        o->next->prev = o->prev;
-      } else {
-        tail = o->prev;
-      }
-      totalQty -= o->remaining;
-      o->prev = nullptr;
-      o->next = nullptr;
-    }
-  };
-
-  using BidMap = std::map<int64_t, PriceLevel, std::greater<int64_t>>;
-  using AskMap = std::map<int64_t, PriceLevel>;
-
   // Matches an incoming order against one side of the book (`book` is the opposite side).
   // `limit` empty means a market order. Returns the unfilled quantity.
-  template <class Map>
-  uint32_t match_against(Map& book, uint64_t takerId, bool takerIsBuy,
+  template <class Levels>
+  uint32_t match_against(Levels& book, uint64_t takerId, bool takerIsBuy,
                          std::optional<int64_t> limit, uint32_t qty, std::vector<Trade>& out);
 
-  template <class Map>
-  bool check_side(const Map& book, Side side, std::size_t& counted) const;
+  template <class Levels>
+  bool check_side(const Levels& book, Side side, std::size_t& counted) const;
 
   void rest(uint64_t id, Side side, int64_t price, uint32_t qty, uint32_t remaining);
 
   OrderPool pool_;  // owns the storage of every resting Order
-  BidMap bids_;
-  AskMap asks_;
+  PriceLevels<true> bids_;
+  PriceLevels<false> asks_;
   IdIndex index_;  // id -> Order*; the Orders themselves live in pool_
   uint64_t seq_ = 0;
 };
