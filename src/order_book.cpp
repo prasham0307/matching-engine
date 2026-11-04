@@ -115,6 +115,22 @@ uint32_t OrderBook::total_qty_at(Side side, int64_t price) const {
   return it == asks_.end() ? 0u : static_cast<uint32_t>(it->second.totalQty);
 }
 
+std::vector<std::pair<int64_t, uint32_t>> OrderBook::depth(Side side) const {
+  std::vector<std::pair<int64_t, uint32_t>> levels;
+  if (side == Side::Buy) {
+    levels.reserve(bids_.size());
+    for (const auto& [price, level] : bids_) {
+      levels.emplace_back(price, static_cast<uint32_t>(level.totalQty));
+    }
+  } else {
+    levels.reserve(asks_.size());
+    for (const auto& [price, level] : asks_) {
+      levels.emplace_back(price, static_cast<uint32_t>(level.totalQty));
+    }
+  }
+  return levels;
+}
+
 template <class Map>
 bool OrderBook::check_side(const Map& book, Side side, std::size_t& counted) const {
   for (const auto& [price, level] : book) {

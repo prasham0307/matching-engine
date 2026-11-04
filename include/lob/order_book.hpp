@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "lob/types.hpp"
@@ -26,6 +27,11 @@ class OrderBook {
   std::optional<int64_t> best_bid() const;
   std::optional<int64_t> best_ask() const;
   uint32_t total_qty_at(Side side, int64_t price) const;
+
+  // (price, total qty) for every level on one side, best price first. Read-only, for display.
+  std::vector<std::pair<int64_t, uint32_t>> depth(Side side) const;
+
+  bool is_resting(uint64_t id) const { return orders_.contains(id); }
 
   // Verifies the structural invariants of the book. For tests and debugging only.
   bool check_invariants() const;

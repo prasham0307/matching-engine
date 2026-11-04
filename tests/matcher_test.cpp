@@ -2,6 +2,7 @@
 
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "lob/naive_matcher.hpp"
@@ -323,6 +324,44 @@ TYPED_TEST(MatcherTest, InvariantsHoldAfterEveryOperationInScriptedSequence) {
   check(m);
   EXPECT_FALSE(m.best_bid().has_value());
   EXPECT_EQ(m.best_ask(), 90);
+}
+
+using Levels = std::vector<std::pair<int64_t, uint32_t>>;
+
+TEST(OrderBookDepth, ListsLevelsBestPriceFirst) {
+  OrderBook book;
+  EXPECT_TRUE(book.depth(Side::Buy).empty());
+  EXPECT_TRUE(book.depth(Side::Sell).empty());
+
+  book.submit_limit(3, Side::Sell, 103, 4);
+  book.submit_limit(2, Side::Sell, 102, 6);
+  book.submit_limit(1, Side::Sell, 101, 3);
+  book.submit_limit(4, Side::Sell, 101, 2);
+  book.submit_limit(11, Side::Buy, 100, 5);
+  book.submit_limit(12, Side::Buy, 100, 3);
+  book.submit_limit(13, Side::Buy, 99, 10);
+
+  EXPECT_EQ(book.depth(Side::Sell), (Levels{{101, 5}, {102, 6}, {103, 4}}));
+  EXPECT_EQ(book.depth(Side::Buy), (Levels{{100, 8}, {99, 10}}));
+
+  // Fully fills level 101 and takes 3 from level 102.
+  book.submit_limit(20, Side::Buy, 102, 8);
+  EXPECT_EQ(book.depth(Side::Sell), (Levels{{102, 3}, {103, 4}}));
+  EXPECT_EQ(book.depth(Side::Buy), (Levels{{100, 8}, {99, 10}}));
+
+  EXPECT_TRUE(book.cancel(13));  // last order at 99, so the level disappears
+  EXPECT_EQ(book.depth(Side::Buy), (Levels{{100, 8}}));
+  EXPECT_TRUE(book.check_invariants());
+}
+
+TEST(OrderBookDepth, IsRestingTracksLiveOrders) {
+  OrderBook book;
+  book.submit_limit(1, Side::Sell, 101, 3);
+  EXPECT_TRUE(book.is_resting(1));
+  EXPECT_FALSE(book.is_resting(2));
+  book.submit_limit(2, Side::Buy, 101, 3);  // fills order 1 completely
+  EXPECT_FALSE(book.is_resting(1));
+  EXPECT_FALSE(book.is_resting(2));
 }
 
 }  // namespace

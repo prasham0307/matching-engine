@@ -25,3 +25,15 @@ Release (-O3, the default build type):
 ## Benchmarks
 
     ./build-release/bench/lob_bench
+
+## Interactive demo
+
+    ./build-release/tools/lob_demo            # runs on OrderBook
+    ./build-release/tools/lob_demo --naive    # same commands on NaiveMatcher
+
+Type `help` for the commands. A good first session:
+
+    scenario quiz
+    limit buy 102 8
+
+You can also pipe commands in: `./build-release/tools/lob_demo < commands.txt`.
