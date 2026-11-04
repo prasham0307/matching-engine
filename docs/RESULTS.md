@@ -53,7 +53,7 @@ Reproduce:
 | Date | Change | Commit | p50 | p99 | p99.9 | Orders/sec | Notes |
 |---|---|---|---|---|---|---|---|
 | 2026-11-04 | baseline: std::map + unique_ptr orders | e5f469b | 142 ns | 890 ns | 1,719 ns | 3.89M | Median of 3 runs. 2,811,186 trades, 81,137 resting orders at end, checksum 002f8ec71a31eeb9, timer overhead 26 ns |
-| 2026-11-04 | pool Orders + reuse trade buffer | (this commit) | 135 ns | 583 ns | 1,081 ns | 4.54M | Median of 5 runs per metric, not one run. Same-session before: p50 158, p99 970, p99.9 1,733, 3.59M ops/s. Before and after ranges do not overlap. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 1" below |
+| 2026-11-04 | pool Orders + reuse trade buffer | 0b81941 | 135 ns | 583 ns | 1,081 ns | 4.54M | Median of 5 runs per metric, not one run. Same-session before: p50 158, p99 970, p99.9 1,733, 3.59M ops/s. Before and after ranges do not overlap. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 1" below |
 
 ## Baseline runs (run-to-run variation)
 
