@@ -65,6 +65,7 @@ struct Options {
   uint64_t warmup = 200'000;
   uint64_t seed = 1;
   std::optional<int> pin_core;
+  std::optional<uint64_t> resting;  // expected peak resting orders, sizes the id index
   std::string dump_path;
 };
 
@@ -75,6 +76,8 @@ void print_usage(const char* argv0) {
                "  --warmup N     warm-up operations, timings discarded (default 200000)\n"
                "  --seed S       generator seed (default 1)\n"
                "  --pin-core C   pin the thread to core C (default: no pinning)\n"
+               "  --resting N    expected peak resting orders, sizes the id index so it does not\n"
+               "                 grow while timing (default: (warmup + ops) / 50, at least 1024)\n"
                "  --dump PATH    write raw per-op latencies in ns, one per line\n",
                argv0);
 }
@@ -117,6 +120,8 @@ bool parse_args(int argc, char** argv, Options& opt) {
       opt.seed = *n;
     } else if (arg == "--pin-core") {
       opt.pin_core = static_cast<int>(*n);
+    } else if (arg == "--resting") {
+      opt.resting = *n;
     } else {
       std::fprintf(stderr, "error: unknown option '%s'\n", argv[i - 1]);
       return false;
@@ -255,7 +260,12 @@ int main(int argc, char** argv) {
   const double timer_overhead_ns = measure_timer_overhead_ns();
 
   // 2. Warm-up on a fresh book, timings discarded.
-  OrderBook book;
+  // The generator leaves about 1 resting order per 64 ops at the end of a long run (81,137 after
+  // 5.2M ops), so 1 per 50 leaves headroom. The point is that the id index never has to grow
+  // inside the measured loop; the resize counter below confirms it.
+  const uint64_t expected_resting =
+      opt.resting ? *opt.resting : std::max<uint64_t>(1024, (opt.warmup + opt.ops) / 50);
+  OrderBook book(static_cast<std::size_t>(expected_resting));
   uint64_t sink = 0;
   Result result;
   result.trades.reserve(64);  // the generator's quantities cap one op at 20 trades
@@ -265,6 +275,7 @@ int main(int argc, char** argv) {
   }
 
   // 3. Measured loop. latencies is preallocated; nothing in the loop allocates in the harness.
+  const std::size_t resizes_before = book.id_index_resizes();
   std::vector<uint64_t> latencies(opt.ops);
   uint64_t checksum = 0;
   uint64_t trade_count = 0;
@@ -282,6 +293,7 @@ int main(int argc, char** argv) {
     trade_count += result.trades.size();
   }
   const auto loop_end = Clock::now();
+  const std::size_t resizes_measured = book.id_index_resizes() - resizes_before;
   const int cpu_after = sched_getcpu();
   const double wall_s = std::chrono::duration<double>(loop_end - loop_start).count();
 
@@ -334,15 +346,18 @@ int main(int argc, char** argv) {
               timer_overhead_ns);
   std::printf("  trades          %llu\n", static_cast<unsigned long long>(trade_count));
   std::printf("  resting orders  %llu (at end)\n", static_cast<unsigned long long>(resting));
+  std::printf("  id index        %zu slots for %llu expected resting orders, resizes: %zu total, %zu in measured loop\n",
+              book.id_index_capacity(), static_cast<unsigned long long>(expected_resting),
+              book.id_index_resizes(), resizes_measured);
   std::printf("  checksum        %016llx\n", static_cast<unsigned long long>(checksum));
   std::printf(
       "RESULT p50=%llu p90=%llu p99=%llu p999=%llu max=%llu ops_per_sec=%.0f timer_ns=%.0f "
-      "trades=%llu resting=%llu checksum=%016llx\n",
+      "trades=%llu resting=%llu index_resizes_measured=%zu checksum=%016llx\n",
       static_cast<unsigned long long>(p50), static_cast<unsigned long long>(p90),
       static_cast<unsigned long long>(p99), static_cast<unsigned long long>(p999),
       static_cast<unsigned long long>(pmax), ops_per_sec, timer_overhead_ns,
       static_cast<unsigned long long>(trade_count), static_cast<unsigned long long>(resting),
-      static_cast<unsigned long long>(checksum));
+      resizes_measured, static_cast<unsigned long long>(checksum));
 
   // Keep the warm-up results observable so none of that work can be elided.
   if (sink == 0x1234567890abcdefULL) std::puts("(sink)");

@@ -5,10 +5,10 @@
 #include <functional>
 #include <map>
 #include <optional>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "lob/id_index.hpp"
 #include "lob/order_pool.hpp"
 #include "lob/types.hpp"
 
@@ -19,6 +19,11 @@ namespace lob {
 // public interface and rules as NaiveMatcher, which it is tested against.
 class OrderBook {
  public:
+  // `expected_resting_orders` sizes the id index so it never has to grow while the book holds
+  // that many orders or fewer. Growing is still correct, just a slow path that allocates.
+  explicit OrderBook(std::size_t expected_resting_orders = 1024)
+      : index_(expected_resting_orders) {}
+
   // Hot-path API. Trades are written to `out`, which is cleared first and keeps its capacity, so
   // a buffer reused across calls stops allocating once it has grown to the largest result.
   // A rejected or non-matching call leaves `out` empty.
@@ -54,7 +59,12 @@ class OrderBook {
   // (price, total qty) for every level on one side, best price first. Read-only, for display.
   std::vector<std::pair<int64_t, uint32_t>> depth(Side side) const;
 
-  bool is_resting(uint64_t id) const { return orders_.contains(id); }
+  bool is_resting(uint64_t id) const { return index_.contains(id); }
+
+  // Id index statistics, so a benchmark can confirm the index never grew while it was timing.
+  std::size_t resting_orders() const { return index_.size(); }
+  std::size_t id_index_capacity() const { return index_.capacity(); }
+  std::size_t id_index_resizes() const { return index_.resize_count(); }
 
   // Verifies the structural invariants of the book. For tests and debugging only.
   bool check_invariants() const;
@@ -112,7 +122,7 @@ class OrderBook {
   OrderPool pool_;  // owns the storage of every resting Order
   BidMap bids_;
   AskMap asks_;
-  std::unordered_map<uint64_t, Order*> orders_;  // id index; the Orders live in pool_
+  IdIndex index_;  // id -> Order*; the Orders themselves live in pool_
   uint64_t seq_ = 0;
 };
 

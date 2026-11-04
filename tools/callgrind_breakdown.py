@@ -11,9 +11,9 @@ on a build with -DLOB_CALLGRIND, so only the order book's work is collected.
 
 What is MEASURED (read straight from the profile): instruction counts, simulated cache misses,
 simulated branch mispredicts, call counts, per-function self and inclusive cost, and self cost per
-source file (which separates inlined std::map / unordered_map / vector code).
+source file (which separates inlined std::map / id index / vector code).
 What is ESTIMATED: the 50/50 split of resting-order allocator work between the Order object and
-the unordered_map node (not applicable with --pooled), the split of one mixed delete bucket between vector<Trade> buffers and
+the id-index node (not applicable with --pooled), the split of one mixed delete bucket between vector<Trade> buffers and
 map nodes (by call counts), and every "est. cycles" number (a simple cost model, not hardware).
 """
 import collections
@@ -91,8 +91,9 @@ def category(fn, fl):
     if fn.startswith('std::_Rb_tree_') or f.endswith(('stl_tree.h', 'stl_map.h')):
         return 'std::map (price levels)'
     if '_Hashtable' in fn or '_Prime_rehash' in fn or \
-            f.endswith(('hashtable.h', 'hashtable_policy.h', 'unordered_map.h', 'functional_hash.h')):
-        return 'unordered_map (id index)'
+            f.endswith(('hashtable.h', 'hashtable_policy.h', 'unordered_map.h', 'functional_hash.h',
+                        'id_index.hpp')):
+        return 'id index (hash table)'
     if f.endswith(('stl_vector.h', 'vector.tcc', 'stl_uninitialized.h')):
         return 'vector<Trade> logic'
     if f.endswith(('new_allocator.h', 'alloc_traits.h', 'unique_ptr.h')):
@@ -198,10 +199,11 @@ def main(path, ops):
     # Components with allocator work attributed to the structure that owns the allocation.
     # ESTIMATE: resting-order lifecycle (2 allocations per order) split 50/50 Order vs hash node.
     life = own['resting order lifecycle']
-    # With --pooled the Order objects come from OrderPool, so the whole bucket is the id-index node.
+    # With --pooled the Order objects come from OrderPool, so the whole bucket is the id-index node
+    # (only the node-based unordered_map id index allocates; the flat IdIndex does not).
     order_share = 0.0 if POOLED else 0.5
     rows = [
-        ('unordered_map (own code + node allocs)', cats['unordered_map (id index)'][0] + life * (1 - order_share)),
+        ('id index (own code + node allocs)', cats['id index (hash table)'][0] + life * (1 - order_share)),
         ('vector<Trade> (own code + buffer allocs)', cats['vector<Trade> logic'][0] + own['vector<Trade>']),
         ('matching loop + book logic', cats['matching loop + book logic'][0]),
         ('std::map (own code + node allocs)', cats['std::map (price levels)'][0] + own['std::map level nodes']),
@@ -225,7 +227,7 @@ def main(path, ops):
     est = {
         'heap allocation, all owners': alloc_c,
         'matching loop + book logic': eng_cyc['matching loop + book logic'],
-        'unordered_map ops (excl. allocation)': eng_cyc['unordered_map (id index)'],
+        'id index ops (excl. allocation)': eng_cyc['id index (hash table)'],
         'std::map ops (excl. allocation)': eng_cyc['std::map (price levels)'],
         'vector<Trade> logic (excl. allocation)': eng_cyc['vector<Trade> logic'],
         'glue/other': glue_c,
@@ -244,7 +246,7 @@ def main(path, ops):
                                 own['vector<Trade>'] / alloc_total,
                                 own['std::map level nodes'] / alloc_total)
         attributed = {
-            'unordered_map (ops + its node allocs)': est['unordered_map ops (excl. allocation)'] + alloc_c * life_f * (1 - order_share),
+            'id index (ops + its node allocs)': est['id index ops (excl. allocation)'] + alloc_c * life_f * (1 - order_share),
             'vector<Trade> (logic + buffer allocs)': est['vector<Trade> logic (excl. allocation)'] + alloc_c * vec_f,
             'std::map (ops + level node allocs)': est['std::map ops (excl. allocation)'] + alloc_c * map_f,
             'Order objects (allocs only)': alloc_c * life_f * (1 - order_share),

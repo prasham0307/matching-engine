@@ -28,7 +28,9 @@ harness, seed and operation count so rows are comparable.
   preallocated vector. Up to and including the baseline row, the trade vector an operation
   returned was built inside the timed region (the engine's allocation counted) and destroyed
   after it. From the pooling row onward the harness reuses one trade buffer for every op, as the
-  engine's buffer API is meant to be used.
+  engine's buffer API is meant to be used. From the flat id index row onward the harness also
+  sizes the id index for the expected number of resting orders (`--resting`, default one per 50
+  ops) and prints how many times the index resized inside the measured loop (0 in every run).
 - Percentiles, not averages (nearest-rank). Raw values: the median cost of the timer itself
   (two back-to-back `now()` calls, about 26 ns here) is reported but **not subtracted**.
 - Throughput is measured operations divided by the wall time of the whole measured loop, so it
@@ -54,6 +56,7 @@ Reproduce:
 |---|---|---|---|---|---|---|---|
 | 2026-11-04 | baseline: std::map + unique_ptr orders | e5f469b | 142 ns | 890 ns | 1,719 ns | 3.89M | Median of 3 runs. 2,811,186 trades, 81,137 resting orders at end, checksum 002f8ec71a31eeb9, timer overhead 26 ns |
 | 2026-11-04 | pool Orders + reuse trade buffer | 0b81941 | 135 ns | 583 ns | 1,081 ns | 4.54M | Median of 5 runs per metric, not one run. Same-session before: p50 158, p99 970, p99.9 1,733, 3.59M ops/s. Before and after ranges do not overlap. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 1" below |
+| 2026-11-04 | flat open-addressed id index | (this commit) | 92 ns | 413 ns | 722 ns | 5.97M | Median of 5 runs per metric, same-session before: p50 121, p99 532, p99.9 990, 4.92M ops/s. Interleaved A/B against the previous code (6 pairs, every pair faster): 4.67M to 6.10M ops/s, +30.6%. Index resizes in measured loop: 0. Checksum unchanged (002f8ec71a31eeb9). See "Optimization 2" below |
 
 ## Baseline runs (run-to-run variation)
 
@@ -305,3 +308,142 @@ agrees with the measured throughput gain.
 - Raw reports for the after-profile are in `docs/profiles/after_pool_*` (the `.callgrind` files
   are the raw profiles; regenerate the breakdowns with `tools/callgrind_breakdown.py FILE OPS
   --pooled`).
+
+## Optimization 2: flat open-addressed id index
+
+Change: `unordered_map<uint64_t, Order*>` is replaced by `IdIndex` (`include/lob/id_index.hpp`),
+a flat open-addressed hash table. One contiguous 64-byte-aligned array of 16-byte
+`{key, Order*}` slots, power-of-two capacity, linear probing, load factor strictly under 0.5,
+backward-shift deletion (no tombstones). Hash: `((id ^ (id >> 32)) * golden) >> (64 - log2 cap)`,
+one multiply, because `std::hash<uint64_t>` is the identity on libstdc++ and a power-of-two mask
+would then cluster ids that share low bits (unordered_map hides that with a prime modulus, which
+costs a division per lookup). The table is sized from an expected entry count passed to the
+`OrderBook` constructor and never allocates while the book stays under that count; growing
+(double and rehash) is a documented rare slow path with a `resize_count()` so a benchmark can
+prove it did not run. The `std::map` levels and `NaiveMatcher` are untouched.
+
+Rejected alternatives: `unordered_map` with `reserve` and pooled nodes (keeps bucket then node
+chasing and the modulo); intrusive chaining through a new `Order` field (bigger `Order`, a miss
+walks Orders); a `vector<Order*>` indexed directly by id (fastest here because the generator's ids
+are dense, but wrong for sparse or client-chosen ids and would flatter the benchmark); tombstones
+(this workload inserts and erases about 0.4 times per op, so chains would fill with dead entries
+and force rehash spikes); Robin Hood, quadratic or double hashing, SIMD group probing (more
+complexity or worse locality than plain linear probing at load under 0.5).
+
+Behavior is identical: the checksum is `002f8ec71a31eeb9` in every run, the fuzz test passes at
+default sizes in Debug with ASan/UBSan and in Release (trade counts unchanged), and 20 new tests
+cover the table (collision chains, backward shift for every erase position including a chain that
+wraps the end of the array, growth, no growth when presized, steady churn, strided keys, and a
+randomized comparison with `std::unordered_map`) plus two `OrderBook` tests.
+
+### Latency and throughput (Release, pinned core 2, 5M ops, seed 1, 5 runs each, same session)
+
+| Metric | Before: median (min to max) | After: median (min to max) | Change of median |
+|---|---|---|---|
+| p50 | 121 ns (118 to 131) | 92 ns (87 to 100) | -24.0% |
+| p90 | 266 ns (263 to 290) | 224 ns (186 to 234) | -15.8% |
+| p99 | 532 ns (511 to 553) | 413 ns (368 to 428) | -22.4% |
+| p99.9 | 990 ns (907 to 1,066) | 722 ns (640 to 779) | -27.1% |
+| Orders/sec | 4.92M (4.77M to 5.21M) | 5.97M (5.75M to 6.35M) | +21.2% |
+
+Ranges do not overlap for any metric, and the throughput spread within a set is about 9% before
+and 10% after, so +21% is outside the noise. The id index was sized at 262,144 slots for 104,000
+expected resting orders (81,137 actually rest at the end): 0 resizes in total, 0 in the measured
+loop, in all 5 runs.
+
+### Cross-check: interleaved A/B
+
+The two sets above were taken minutes apart, and this machine's state moves (see the note below),
+so the pre-change code (built from the previous commit with the Release flags and no profiling
+hooks) was also run against the new code alternately, 6 pairs:
+
+| Metric | Old: median (min to max) | New: median (min to max) | Change of median |
+|---|---|---|---|
+| p50 | 134 ns (121 to 138) | 94 ns (90 to 101) | -29.7% |
+| p90 | 284 ns (256 to 293) | 206 ns (195 to 216) | -27.4% |
+| p99 | 510 ns (469 to 550) | 356 ns (334 to 374) | -30.1% |
+| p99.9 | 892 ns (846 to 1,231) | 592 ns (557 to 632) | -33.6% |
+| Orders/sec | 4.67M (4.57M to 5.17M) | 6.10M (5.82M to 6.41M) | +30.6% |
+
+The new code was faster in every one of the 6 pairs (throughput ratios 1.24 to 1.32). The
+sequential figure (+21%) is the conservative one to quote; the interleaved figure is the more
+reliable estimate of the gain.
+
+### Engine-only profile (Callgrind) and whole-program Cachegrind
+
+| | Before (previous commit) | After |
+|---|---|---|
+| Instructions per op | 374 (200k ops), 375 (5M ops) | 281 (200k), 284 (5M) |
+| Allocator calls per op | 1.35 (200k), 1.27 (5M) | 0.52 (200k), 0.49 (5M) |
+| Allocator instructions per op | 104 | 39 |
+| Simulated L1 data misses per op | 1.51 (200k), 2.03 (5M) | 1.58 (200k), 1.65 (5M) |
+| Id index own code, instructions per op (5M) | 66, plus about 65 for its node allocations | 31, no allocation |
+| Id index L1 data misses per op (5M) | 0.98 | 0.91 |
+| Simulated mispredicts per op (5M) | 5.30 | 4.49 |
+
+Cachegrind, whole program (so it includes harness setup, which is why instructions per op are
+higher than the engine-only figures): 5M run 920 to 819 instructions per measured op, D1 miss
+rate 1.7% to 1.8%, last-level data miss rate 0.6% to 0.7%; 200k run 1,385 to 1,289 instructions
+per op, D1 1.3% to 1.5%, LL 0.3% to 0.3%. The miss rates rise slightly because the denominator
+(data references) fell more than the number of misses; misses per measured op fell from 6.15 to
+5.43 at 5M and rose from 7.42 to 8.21 at 200k.
+
+What still allocates (5M, per op): 0.49 calls for `std::map` level nodes, nothing else.
+
+Engine instruction share after the change (5M): matching loop and book logic 37.5%, `std::map`
+with its node allocations 35.5%, id index 12.0%, `vector<Trade>` 7.5%, glue and other 7.0%. By the
+baseline cost model (an estimate, not hardware validated) the engine is about 181 cycles per op,
+down from about 231: `std::map` operations plus level-node allocations about 36%, matching loop
+about 31%, id index about 20%.
+
+### Experiment (not committed): is the L1 miss count about the hash?
+
+The expectation going in was about 1 L1 data miss per op, and the measurement was 1.65. The
+id index still takes about 0.9 simulated misses per op because the multiply hash scatters
+sequential ids across the 4 MB table, so each lookup lands on a different cache line, while the
+generator mostly touches recent ids. To test that, the same table was run with an identity hash
+(slot = id masked), which keeps sequential ids adjacent:
+
+| | Mixed hash (committed) | Identity hash (experiment) |
+|---|---|---|
+| Simulated L1 data misses per op (5M) | 1.65 | 0.99 |
+| Id index L1 misses per op | 0.91 | 0.27 |
+| Instructions per op | 284 | 282 |
+| Wall clock, 3 interleaved pairs | 5.60M, 5.84M, 6.18M ops/s | 5.95M, 5.70M, 6.44M ops/s |
+
+The mechanism is confirmed, and it did not matter for speed: an L1 miss served by L2 costs on the
+order of 14 cycles, about 0.6 fewer misses per op is under 10 cycles, and an op costs several
+hundred cycles, so the wall-clock difference is below the noise. The identity hash is not adopted:
+it is only safe for ids that happen to be dense and sequential (the strided-key test shows why
+the mix exists), and it buys nothing measurable. Raw profile:
+`docs/profiles/experiment_identity_hash_callgrind_5m.callgrind`.
+
+### Notes and surprises
+
+- **The machine has a fast mode.** An unrelated batch of 5 runs of the identity-hash binary gave
+  8 to 12M ops/s (p50 about 48 ns) in 3 of 5 runs, double anything else seen, and the interleaved
+  control a few minutes later did not reproduce it for either variant. So a 2x swing from machine
+  state alone is possible here (frequency or scheduling on WSL2), and back-to-back sequential
+  sets can be misleading. This task used interleaved A/B as a cross-check, and doing so for
+  future optimizations is recommended.
+- Instructions per op fell 24% (375 to 284); throughput rose 21% to 31%. The id index lost
+  more than half of its own instructions (66 to 31 per op) and all of its allocation work.
+- L1 misses per op fell at 5M (2.03 to 1.65) but not at 200k (1.51 to 1.58): with a small book the
+  old node-based map kept its hot nodes close together, while the flat table spreads ids over a
+  256 KB array. At realistic sizes the flat table wins.
+- Memory trade: the table is 4 MB at 31% load for the 81k live orders. The 0.5 load limit is what
+  keeps probe chains short, so some sparsity is the price.
+- Simulated mispredicts per op fell from 5.30 to 4.49; the id index share fell from 1.36 to 0.69.
+  Valgrind's predictor is crude, so treat this as a trend only.
+
+### Next target
+
+The profile now points at the `std::map` price levels. Together with their node allocations they
+are 90.7 instructions per op (35.5% of engine instructions, about 36% of estimated time) and the
+only remaining source of allocation (0.49 calls per op, because a level is created and destroyed
+whenever it fills or empties). They also contribute 1.40 of the 4.49 simulated mispredicts per op
+through tree descent and rebalancing. The matching loop itself is second (37.5% of instructions,
+about 31% of estimated time) and contains the inlined map operations, so it should be revisited
+after the levels. Candidate direction: a flat array of price levels indexed by tick offset, with
+a best-price cursor, checking first that the price band assumption does not just overfit the
+generator.

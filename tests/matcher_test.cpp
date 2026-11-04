@@ -455,4 +455,47 @@ TEST(OrderBookBuffer, WrappersAgreeWithTheBufferApi) {
   EXPECT_EQ(wrapped.total_qty_at(Side::Buy, 100), buffered.total_qty_at(Side::Buy, 100));
 }
 
+
+
+TEST(OrderBookIndex, SmallInitialCapacityGrowsTransparently) {
+  OrderBook small(1);    // forces the id index through many resizes
+  OrderBook presized(5000);
+  for (uint64_t id = 1; id <= 3000; ++id) {
+    small.submit_limit(id, Side::Buy, 100, 1);
+    presized.submit_limit(id, Side::Buy, 100, 1);
+  }
+  EXPECT_GT(small.id_index_resizes(), 0u);
+  EXPECT_EQ(presized.id_index_resizes(), 0u);
+  EXPECT_EQ(small.resting_orders(), 3000u);
+  EXPECT_EQ(presized.resting_orders(), 3000u);
+  EXPECT_TRUE(small.check_invariants());
+  EXPECT_TRUE(presized.check_invariants());
+
+  for (uint64_t id = 1; id <= 3000; id += 2) {
+    EXPECT_TRUE(small.cancel(id));
+    EXPECT_TRUE(presized.cancel(id));
+  }
+  EXPECT_EQ(small.depth(Side::Buy), presized.depth(Side::Buy));
+  EXPECT_EQ(small.resting_orders(), 1500u);
+  EXPECT_FALSE(small.is_resting(1));
+  EXPECT_TRUE(small.is_resting(2));
+  EXPECT_TRUE(small.check_invariants());
+  EXPECT_EQ(presized.id_index_resizes(), 0u);
+}
+
+TEST(OrderBookIndex, FilledAndCancelledOrdersLeaveTheIndex) {
+  OrderBook book;
+  book.submit_limit(1, Side::Sell, 101, 3);
+  book.submit_limit(2, Side::Sell, 101, 3);
+  EXPECT_EQ(book.resting_orders(), 2u);
+  book.submit_limit(3, Side::Buy, 101, 3);  // fills order 1
+  EXPECT_FALSE(book.is_resting(1));
+  EXPECT_TRUE(book.is_resting(2));
+  EXPECT_TRUE(book.cancel(2));
+  EXPECT_FALSE(book.is_resting(2));
+  EXPECT_EQ(book.resting_orders(), 0u);
+  EXPECT_FALSE(book.cancel(1));
+  EXPECT_TRUE(book.check_invariants());
+}
+
 }  // namespace

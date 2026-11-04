@@ -1,0 +1,12 @@
+Command: /tmp/claude-1000/-mnt-d-Projects-matching-engine/c3431db3-ff9c-4d28-bcdd-555311ef9393/scratchpad/lob_latency_head --ops 200000 --warmup 20000 --seed 1
+I refs:        276,990,382
+I1  misses:          3,017
+LLi misses:          2,910
+D refs:        116,273,277  (70,730,593 rd   + 45,542,684 wr)
+D1  misses:      1,483,360  (   995,493 rd   +    487,867 wr)
+LLd misses:        328,773  (     7,795 rd   +    320,978 wr)
+D1  miss rate:         1.3% (       1.4%     +        1.1%  )
+LLd miss rate:         0.3% (       0.0%     +        0.7%  )
+LL refs:         1,486,377  (   998,510 rd   +    487,867 wr)
+LL misses:         331,683  (    10,705 rd   +    320,978 wr)
+LL miss rate:          0.1% (       0.0%     +        0.7%  )
