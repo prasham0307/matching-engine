@@ -9,13 +9,23 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# ThreadSanitizer cannot be combined with AddressSanitizer, so it is a separate, non-default
+# configuration:  cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLOB_TSAN=ON
+option(LOB_TSAN "Build our targets with ThreadSanitizer instead of ASan and UBSan" OFF)
+
 # Per-config flags. Applied only to our targets, not to fetched dependencies.
 add_library(lob_flags INTERFACE)
-target_compile_options(lob_flags INTERFACE
-  $<$<CONFIG:Debug>:-Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer>
-  $<$<CONFIG:Release>:-O3>)
-target_link_options(lob_flags INTERFACE
-  $<$<CONFIG:Debug>:-fsanitize=address,undefined>)
+if(LOB_TSAN)
+  target_compile_options(lob_flags INTERFACE
+    -Wall -Wextra -Wpedantic -g -O1 -fsanitize=thread -fno-omit-frame-pointer)
+  target_link_options(lob_flags INTERFACE -fsanitize=thread)
+else()
+  target_compile_options(lob_flags INTERFACE
+    $<$<CONFIG:Debug>:-Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer>
+    $<$<CONFIG:Release>:-O3>)
+  target_link_options(lob_flags INTERFACE
+    $<$<CONFIG:Debug>:-fsanitize=address,undefined>)
+endif()
 
 include(FetchContent)
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
