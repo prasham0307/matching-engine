@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "lob/order_book.hpp"
+#include "bench_common.hpp"
 #include "lob/order_generator.hpp"
 
 #if defined(__clang__)
@@ -41,6 +42,8 @@
 #else
 #define LOB_PROFILE_TOGGLE() ((void)0)
 #endif
+
+using namespace lob::bench;
 
 #ifndef LOB_BUILD_TYPE
 #define LOB_BUILD_TYPE "unknown"
@@ -90,22 +93,6 @@ void print_usage(const char* argv0) {
                "                 fits; prices outside the window take a slow path\n"
                "  --dump PATH    write raw per-op latencies in ns, one per line\n",
                argv0);
-}
-
-std::optional<uint64_t> parse_u64(std::string_view s) {
-  uint64_t v = 0;
-  const char* end = s.data() + s.size();
-  const auto [ptr, ec] = std::from_chars(s.data(), end, v);
-  if (s.empty() || ec != std::errc{} || ptr != end) return std::nullopt;
-  return v;
-}
-
-std::optional<int64_t> parse_i64(std::string_view s) {
-  int64_t v = 0;
-  const char* end = s.data() + s.size();
-  const auto [ptr, ec] = std::from_chars(s.data(), end, v);
-  if (s.empty() || ec != std::errc{} || ptr != end) return std::nullopt;
-  return v;
 }
 
 // Returns false (after printing why) if the arguments are unusable.
@@ -167,38 +154,6 @@ bool parse_args(int argc, char** argv, Options& opt) {
   return true;
 }
 
-std::string read_file(const char* path) {
-  std::ifstream in(path);
-  std::stringstream ss;
-  ss << in.rdbuf();
-  return ss.str();
-}
-
-std::string cpu_model() {
-  std::istringstream in(read_file("/proc/cpuinfo"));
-  for (std::string line; std::getline(in, line);) {
-    if (line.rfind("model name", 0) == 0) {
-      const auto colon = line.find(':');
-      if (colon != std::string::npos && colon + 2 <= line.size()) return line.substr(colon + 2);
-    }
-  }
-  return "unknown";
-}
-
-bool running_under_wsl() {
-  std::string v = read_file("/proc/version");
-  for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return v.find("microsoft") != std::string::npos || v.find("wsl") != std::string::npos;
-}
-
-bool pin_to_core(int core) {
-  if (core < 0 || core >= CPU_SETSIZE) return false;
-  cpu_set_t set;
-  CPU_ZERO(&set);
-  CPU_SET(core, &set);
-  return sched_setaffinity(0, sizeof(set), &set) == 0;
-}
-
 // Median cost of two back-to-back steady_clock::now() calls, in ns.
 double measure_timer_overhead_ns() {
   std::vector<int64_t> samples(1'000'000);
@@ -210,40 +165,6 @@ double measure_timer_overhead_ns() {
   const auto mid = samples.begin() + static_cast<std::ptrdiff_t>(samples.size() / 2);
   std::nth_element(samples.begin(), mid, samples.end());
   return static_cast<double>(*mid);
-}
-
-struct Result {
-  std::vector<Trade> trades;
-  bool cancelled = false;
-};
-
-// Runs one operation into the caller's reusable Result. The order book clears r.trades itself.
-void apply(OrderBook& book, const Op& op, Result& r) {
-  r.cancelled = false;
-  switch (op.kind) {
-    case OpKind::Limit:
-      book.submit_limit(op.id, op.side, op.price, op.qty, r.trades);
-      break;
-    case OpKind::Market:
-      book.submit_market(op.id, op.side, op.qty, r.trades);
-      break;
-    case OpKind::Cancel:
-      r.trades.clear();
-      r.cancelled = book.cancel(op.id);
-      break;
-    case OpKind::Modify:
-      book.modify(op.id, op.price, op.qty, r.trades);
-      break;
-  }
-}
-
-// Order-sensitive so a change in matching order or results changes the checksum.
-uint64_t fold(uint64_t checksum, const Result& r) {
-  for (const Trade& t : r.trades) {
-    checksum = (checksum + static_cast<uint64_t>(t.price) * t.qty) ^ t.makerId ^ (t.takerId << 32);
-  }
-  if (r.cancelled) checksum ^= 0x9e3779b97f4a7c15ULL;
-  return checksum;
 }
 
 // Nearest-rank percentile of an ascending-sorted vector.

@@ -98,6 +98,16 @@ Some mistakes were made by Claude Code, not by me. I log those too and say who m
 
 **How I will spot it next time:** When a benchmark says "no difference", I will ask what the workload would have to look like to make a difference, and run that.
 
+### 10. Batch pop doubled throughput, and most of that was the producer getting in the consumer's way
+
+**Context:** In the pipeline benchmark (RESULTS.md, Pipeline benchmark) I predicted that only the batch pop of 32 would clearly beat the default queue, and that the default would be within 10% of the single-thread number. The second part was close enough: -10.2%, -2.5% and +0.5% for single thread against default in the three sets. Three sets of 7 interleaved rounds each gave batch pop at about twice the default, faster in 7 of 7 rounds every time.
+
+**What I got wrong:** I expected the other two variants (uncached counters, unpadded) to sit inside the noise. They were lower than the default in all 21 paired rounds, by about 9% to 17%, although by the strict "ranges do not overlap" rule they separated from the default in only one set. And I thought of batch pop as a modest saving from fewer `release` stores. It doubled the throughput.
+
+**Why:** The matcher is the bottleneck. The producer found the queue full about 1.75 million times per 5,000,000 operations, and the matcher found it empty about 100 times. A producer that spins on a full queue keeps loading `head`, and every single-item pop has to win that cache line back to store to it. Batching makes that store 32 times rarer. A scratch experiment confirmed it: with single-item pops unchanged, making the producer wait longer when the queue was full took the default from about 7.3M to about 14.9M ops/s, the same as batch pop.
+
+**How I will spot it next time:** Before I read a table of variants, I will look at which side is waiting, using the full and empty counts. If the queue is nearly always full, I am measuring how the consumer copes with a hammering producer, not how fast the queue is. And when one variant is suspiciously good, I will test the explanation by changing the other thread, not only the thing under test.
+
 ## Concepts I can explain without notes
 
 A tick means I can explain the concept out loud without opening any file. I only tick after I have tried. The unticked ones are built in the repo, but I have not yet explained them back in my own words.
@@ -120,7 +130,7 @@ A tick means I can explain the concept out loud without opening any file. I only
 - [ ] Cache lines, and why four 16-byte slots share one
 - [ ] Instruction count versus cache misses versus branch mispredicts, and why simulated numbers are not time
 - [ ] AddressSanitizer and UndefinedBehaviorSanitizer, and ASan poisoning inside a pool
-- [ ] SPSC ring buffer (not built)
-- [ ] Memory ordering with acquire and release (not built)
-- [ ] False sharing between threads (not built)
+- [ ] SPSC ring buffer
+- [ ] Memory ordering with acquire and release
+- [ ] False sharing between threads
 - [ ] Replaying real market data (not built)

@@ -638,3 +638,64 @@ All three gave the same trade count (550,871) and the same trade log hash, `0xde
 
 Caveats: two timed runs on WSL2, not interleaved, so the 2.81M and 2.89M figures only show the order of magnitude. This machine has a slow state and a fast state (see Optimization 2 and 3), and I did not control for it here. The `--verify` run was not pinned and its time is dominated by `NaiveMatcher`. The tool and its tests are described in README.md.
 
+## Pipeline benchmark (`lob_pipeline`)
+
+A producer thread pushes the pre-generated operations into an `SpscQueue`, and a matcher thread pops them and applies them to one `OrderBook` with a reused trade buffer. Exactly one thread ever touches the book. The workload is the same as `lob_latency` (default generator config, seed 1, 200,000 warm-up operations then 5,000,000 measured). The benchmark reports **matcher-side throughput** only: measured operations divided by the time from the end of the warm-up to the last operation processed. It does not measure how long an item spends in the queue, so it says nothing about queue latency.
+
+Commands:
+
+    cmake --build build-release -j
+    ./build-release/bench/lob_pipeline --ops 5000000 --warmup 200000 --seed 1 --matcher-core 2 --producer-core 4
+    python3 tools/pipeline_compare.py --rounds 7
+
+The second command runs one variant (`--variant default|uncached|unpadded|batch32`). The third runs every variant plus `lob_latency` once per round, 7 rounds, rotating which one goes first, and prints medians, ranges and paired comparisons.
+
+Machine and cores: Intel Core Ultra 9 185H, 22 logical cores, WSL2. The matcher thread is pinned to core 2 (SMT siblings 2-3), the same core `lob_latency` is pinned to. The producer thread is pinned to core 4 (siblings 4-5), a different physical core. The program checks the core count first: it refuses to run with fewer than 2 cores, or if the two cores are the same or do not exist, and prints a warning if they are SMT siblings of one physical core. It prints the cores each thread actually ran on at the start and the end (core 2 and core 4 in every run here). It refuses to run in a Debug build. Queue capacity is 1024 slots of 40-byte `Op`.
+
+**Determinism.** For the same operations and seed, the pipeline gives the same checksum as `lob_latency`: `002f8ec71a31eeb9`, with 2,811,186 trades and 81,137 resting orders. All 105 runs below (three sets of 35) produced that one checksum. Putting a queue and a second thread in front of the book did not change any result.
+
+### The four variants, interleaved, 7 rounds, three independent sets
+
+Median of 7 rounds in M ops/s, with the min and max in brackets. "Paired" counts the rounds in which the variant beat the default measured in the same round, with the median of those per-round ratios (sets B and C; for set A, all 7 rounds had both the uncached and unpadded variants below the default and batch pop above it, read off the per-round lines).
+
+| Variant | Set A | Set B | Set C | Paired, set B | Paired, set C |
+|---|---|---|---|---|---|
+| Default: cached counters, padded | 7.54 (6.87 to 8.44) | 7.57 (7.11 to 8.11) | 7.42 (7.05 to 7.90) | reference | reference |
+| Uncached counters, padded | 6.46 (6.06 to 6.92) | 6.31 (6.06 to 6.46) | 6.32 (6.03 to 7.07) | 0/7 faster, x0.83 | 0/7 faster, x0.86 |
+| Cached counters, unpadded | 6.63 (6.47 to 7.19) | 6.76 (6.38 to 7.10) | 6.55 (5.57 to 7.11) | 0/7 faster, x0.91 | 0/7 faster, x0.89 |
+| Batch pop of 32 | 15.30 (13.54 to 15.59) | 15.11 (14.53 to 16.07) | 14.74 (13.70 to 15.29) | 7/7 faster, x1.99 | 7/7 faster, x1.99 |
+| Single thread (`lob_latency`, same session) | 7.58 (6.87 to 7.67) | 6.80 (6.36 to 7.40) | 7.24 (6.60 to 7.88) | | |
+
+The run-to-run spread of the default (max minus min, as a share of its median) was 20.8%, 13.2% and 11.4% in the three sets.
+
+Which differences are larger than that spread:
+
+- **Batch pop of 32: yes, clearly.** About twice the default (+103%, +100%, +99%), the ranges do not overlap in any set, and it was faster in 7 of 7 rounds in each of the three sets.
+- **Uncached and unpadded: probably real, but about the same size as the noise.** Both were lower than the default in all 21 paired rounds across the three sets, by about 14% to 17% (uncached) and 9% to 12% (unpadded). But by the strict "ranges do not overlap" rule they separate from the default only in set B (the default's own spread is 11% to 21%). So I trust the direction (the sign never flipped in 21 rounds) and I do not trust the exact percentage.
+- **Default pipeline against single thread: no difference I can claim.** The pipeline default was within about 10% of `lob_latency` in every set (single thread against default: +0.5%, -10.2%, -2.5%). `lob_latency` also pays about 25 ns per operation for its two timer calls and the pipeline does not, so the two are not the same harness and this is not a measure of queue overhead.
+
+### Where the time goes: the matcher is the bottleneck, and that changes how to read the table
+
+In the default variant the producer found the queue full about 1.75 million times in 5,000,000 measured operations (1,767,690, 1,747,790 and 1,857,075 in the three sets), and the matcher found it empty about 100 times (107, 102, 103). So the queue is nearly always full: the matcher is slower than the producer and the producer waits. The throughput above is therefore the matcher's, and the variant differences are about how well the matcher copes with a producer that is spinning on the queue, not about how fast the queue moves items in a balanced pipeline.
+
+### Experiment (not committed): why does batch pop double the throughput?
+
+Batch pop does one `release` store to `head` per 32 items instead of one per item. My hypothesis was that this matters so much because the producer, spinning on a full queue, keeps loading the `head` cache line, so each single-item pop has to win the line back to store to it. To test it without touching the consumer, I made a scratch copy of the benchmark in which the producer executes N pause instructions (instead of 1) after each failed push, and ran the default variant (single-item pops) interleaved with batch pop, 5 rounds:
+
+| Variant | Throughput, median (min to max) | Producer found the queue full (median) |
+|---|---|---|
+| default, 1 pause per failed push (as committed) | 7.29M (6.95M to 7.78M) | 1,806,674 |
+| default, 16 pauses per failed push | 12.82M (11.91M to 13.69M) | 178,728 |
+| default, 64 pauses per failed push | 14.08M (13.40M to 14.44M) | 51,071 |
+| default, 256 pauses per failed push | 14.88M (14.27M to 15.05M) | 12,673 |
+| batch pop of 32, 1 pause per failed push | 15.05M (13.38M to 15.72M) | 150,448 |
+
+With single-item pops and a producer that waits longer when the queue is full, the default reaches 14.9M, which is what batch pop reaches. So most of batch pop's gain here comes from stopping the consumer's `head` stores from fighting the producer's polling, not from anything about batching items. This is an artifact of the setup: the producer only copies pre-generated operations, so it is far faster than the matcher and is always waiting. A real producer that is slower than the matcher would not behave like this. The experiment code is not in the repo; it is the benchmark with the single `cpu_relax()` after a failed push in the producer loop replaced by a loop of N of them.
+
+### Caveats
+
+- One machine under WSL2, which has a slow state and a fast state (see Optimization 2 and 3). The single-thread number moved between 6.80M and 7.58M across the three sets. The sets are independent, and the paired view is what removes the drift common to one round.
+- One queue capacity (1024), one workload, one pair of cores.
+- Throughput of the matcher thread only. No queue latency, no tail, no end-to-end time per operation.
+- The unit and stress tests for the queue, the ThreadSanitizer runs, and what they do and do not prove about memory ordering are in DESIGN.md, entry 15.
+

@@ -12,6 +12,7 @@ A limit order book matching engine in C++20 (one order book per symbol, routed b
 - Rejections: a quantity of 0, or an id that is already resting.
 - `depth()`, `best_bid()`, `best_ask()` and `total_qty_at()` for reading the book.
 - Multi-symbol routing with `MatchingEngine`: one book per symbol, order ids unique across symbols, cancel and modify by id alone.
+- A bounded single-producer single-consumer queue (`SpscQueue`) and a two-thread pipeline benchmark (`lob_pipeline`).
 - A reference matcher (`NaiveMatcher`), an interactive demo, a replay tool (`lob_replay`), a latency benchmark, and Valgrind profiling tools.
 
 ## Layout
@@ -28,10 +29,13 @@ A limit order book matching engine in C++20 (one order book per symbol, routed b
       price_level.hpp      one price level, an intrusive FIFO
       order_generator.hpp  seeded random operation stream
       replay.hpp           replay file parser, trade log hash, verify oracle
+      spsc_queue.hpp       bounded single-producer single-consumer queue
     src/                   naive_matcher.cpp, order_book.cpp, matching_engine.cpp, replay.cpp
     tests/                 unit tests, window tests, the differential fuzz test, replay tests and tests/data
-    bench/                 latency_bench.cpp (lob_latency), smoke_bench.cpp (lob_bench)
-    tools/                 demo.cpp (lob_demo), replay.cpp (lob_replay), callgrind_breakdown.py
+    bench/                 latency_bench.cpp (lob_latency), pipeline_bench.cpp (lob_pipeline),
+                           bench_common.hpp, smoke_bench.cpp (lob_bench)
+    tools/                 demo.cpp (lob_demo), replay.cpp (lob_replay), callgrind_breakdown.py,
+                           pipeline_compare.py
     docs/                  DESIGN.md, LEARNING.md, RESULTS.md, profiles/
 
 ## Requirements
@@ -55,7 +59,7 @@ Release build (`-O3`, also the default build type):
     cmake --build build-release -j
     ctest --test-dir build-release --output-on-failure
 
-There are 144 tests. The fuzz test runs 6 seeds. The default is 40,000 operations per seed in Debug and 250,000 in Release for the main scenario, and `FUZZ_OPS` overrides it.
+There are 185 tests. The fuzz test runs 6 seeds. The default is 40,000 operations per seed in Debug and 250,000 in Release for the main scenario, and `FUZZ_OPS` overrides it.
 
 ## Run the demo
 
@@ -131,6 +135,23 @@ Commands:
 
 For `--generate ... --events 1000000 --symbols 3 --seed 1` the replay gives 550,871 trades and the hash `0xde0a019985dd119f`. The events per second it prints includes file parsing and trade log output, so it is not comparable to `lob_latency`. Measurements are in [docs/RESULTS.md](docs/RESULTS.md).
 
+## Pipeline
+
+`SpscQueue` (`include/lob/spsc_queue.hpp`) is a bounded queue for exactly one producer thread and one consumer thread. It uses release and acquire atomics on two 64-bit counters, with no locks and no allocation after construction. `lob_pipeline` runs a producer thread that pushes the benchmark's operations through the queue to one matcher thread that applies them to an `OrderBook`. Matching stays on that one thread.
+
+    ./build-release/bench/lob_pipeline --ops 5000000 --warmup 200000 --seed 1 --matcher-core 2 --producer-core 4
+    python3 tools/pipeline_compare.py --rounds 7      # all queue variants plus lob_latency, interleaved
+
+Both threads are pinned to different cores, and the program refuses to run in a Debug build or on fewer than two cores. For the same operations and seed it prints the same checksum as `lob_latency` (`002f8ec71a31eeb9`), which is the check that the second thread changes no result. It reports matcher-side throughput only, not queue latency. In my runs the default queue was within about 10% of the single-thread number, and a batch pop of 32 roughly doubled it. The queue is almost always full in this setup, so the matcher is the bottleneck and the comparison is about how the matcher copes with a spinning producer. The details and caveats are in [docs/RESULTS.md](docs/RESULTS.md).
+
+The queue is tested with single-thread tests, a two-thread stress test (50,000,000 items in a Release build) and ThreadSanitizer, which is a separate non-default build:
+
+    cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLOB_TSAN=ON
+    cmake --build build-tsan -j --target lob_tests
+    ./build-tsan/tests/lob_tests --gtest_filter='Spsc*'
+
+x86 is strongly ordered, so a missing acquire or release can still pass the normal stress test on this machine. ThreadSanitizer is what checks the orderings. See [docs/DESIGN.md](docs/DESIGN.md), entry 15.
+
 ## Results
 
 All four versions below were measured together, interleaved, in 5 rounds, with the median of each metric. Workload: 5,000,000 operations, seed 1, one pinned core, prices 90 to 110.
@@ -166,7 +187,7 @@ More detail on each choice is in [docs/DESIGN.md](docs/DESIGN.md), and my mistak
 ## Limitations
 
 - **Fixed price window.** Price levels live in a flat array over a window of ticks (default base 0, 4096 ticks). Prices outside it still work, through a `std::map`, but that is a slow path that allocates. On a price band of 1..2000, a window that missed the traffic was about 26% slower in throughput and 38% to 48% worse in p99. Nothing recenters the window. I did not measure windows far larger than 4096 ticks.
-- **One thread.** Each order book matches one symbol, and the `MatchingEngine` router runs all symbols on one thread. There is no multi-threading and no input queue (the SPSC ring buffer is not built). Order ids must be unique across symbols. I have not benchmarked the router, only a single `OrderBook`.
+- **Matching is single-threaded.** Each order book matches one symbol, and the `MatchingEngine` router runs all symbols on one thread. The `SpscQueue` and `lob_pipeline` show one producer thread feeding that matcher thread, but the queue is only used by that benchmark, not by `lob_replay` or the demo. There is one producer, no multi-threaded matching, and no network input. Order ids must be unique across symbols. I have not benchmarked the router, only a single `OrderBook`.
 - **No real market data.** `lob_replay` reads a simple CSV format that the repo defines. The benchmarks and the replay tool both use generated random orders. Reading a real exchange feed format (LOBSTER, for example) is not built.
 - **Simulated cache and branch numbers.** Without `perf`, the profile uses Valgrind. Its cache sizes are a model (no L2) and its branch predictor is crude. The time shares come from a cost model I did not check against hardware counters.
 - **WSL2 noise.** All timings are from WSL2. Native Linux would be better for final numbers.
